@@ -4,6 +4,8 @@
 
 ![Python](https://img.shields.io/badge/Python-3.10%2B-blue) ![FastAPI](https://img.shields.io/badge/FastAPI-REST%20%2B%20Web%20App%20%2B%20MCP-green) ![Tests](https://img.shields.io/badge/pytest-22%20passing-brightgreen) ![License](https://img.shields.io/badge/license-MIT-lightgrey)
 
+**🚀 Live tool: https://outbound-affiliate-link-chain-latency.onrender.com/** — open it, paste URLs, run the audit. No install needed.
+
 > **v3.2.0 enterprise-hardened (this commit):** TLS impersonation is now the PRIMARY per-hop transport (curl-cffi Chrome JA3/H2, pooled-httpx fallback, `per_hop_via` flag on every hop) · per-hop alt-svc capture feeds real `http3_advertised` (no more false negatives) · scoped API-key auth (`audit`/`mcp`/`export`/`admin` via `key:scopes:workspace`) + 60/min per-key rate limit + 2 MB body cap on all server-fetch endpoints · SSRF `assert_safe_url` on every source/sitemap/pasted URL · rule engine unknown-state (`params_intact=None`, mid-chain injection detection, duplicate-preserving params) · edge patches require explicit `fallback_url` (no `example.com` default, JS-escaped, subid/clickid passthrough) · TCF 2.3 parser (2.2 flagged deprecated) · canonical normalization + 9-geo hreflang map + source-vs-final `rel=sponsored` audit · SOV live on all 4 providers (OpenAI/Anthropic/Perplexity/Gemini) with cost caps + 7-day cache + `perplexity-only` partial label · GSC 25k pagination + quota backoff + GA4↔GSC join · HMAC-signed webhooks with correlation IDs · OTel spans on trace/audit fan-out · explicit Playwright fork rule recorded per chain · CrUX history + LCP-budget gate · workspace cost caps + Docker-secrets helper · idempotent runs + 90-run retention + `DELETE /monitor/runs/{id}`. Carried over from v3.1.0:SSRF guard on all server-side fetches (private/link-local/169.254 blocked + 5MB cap) · auth-required SSE with Last-Event-ID resume + persistent job store (Redis → SQLite, survives restart) · schedules in DB (no YAML race) · `tcp_tls` canonical single formula · UA rotated to Chrome 132 / Safari 18.4 · MCP server (`POST /mcp` + `/.well-known/mcp.json`: trace_chain/param_audit/sla_matrix/verify_inputs/ai_visibility/crux_lookup) · live affiliate APIs (Everflow/Cellxpert/IA/NetRefer/MyAff + S2S postback validator with sub1-10/adv1-10) · live GA4 Data API + GSC Search Analytics (CSV = fallback) · prompt-level Share-of-Voice (`POST /audit/sov`) · CrUX history + PSI INP attribution + web-vitals RUM snippet (CrUX/PSI on by default, honest unavailable without keys) · canonical/hreflang/rel=sponsored + HTTP/3 signal audits · Consent Mode v2 + TCF 2.3 parsing · E-E-A-T/dropoff as bands (no fake-precision scores) · F11 corrected per Google May 2026 (llms.txt = agent infra, NOT citation factor) · versioned compliance feed · `/metrics` (Prometheus) + OTel/Sentry hooks · workspaces + key scopes · deep-trace sampling on large bulks. Quickstart with Docker: `docker compose up --build` → http://localhost:8099/ (the tool lives at the domain root; `/app/` kept as an alias. Set `PATHFINDER_API_KEYS` to require API keys).
 
 ![Tool hero — inputs page with site auto-fill](docs/screenshots/01-hero-autofill.png)
@@ -252,7 +254,9 @@ Interactive docs at `GET /docs`. Key endpoints:
 
 ## 10 · Quickstart
 
-Docker (recommended — Playwright Chromium pre-installed, hybrid mode real):
+**Fastest: use the live deployment — https://outbound-affiliate-link-chain-latency.onrender.com/** (Page 1 inputs → Run → Page 2 analysis → Page 3 outputs).
+
+Docker (recommended for self-hosting — Playwright Chromium pre-installed, hybrid mode real):
 
 ```powershell
 docker compose up --build
