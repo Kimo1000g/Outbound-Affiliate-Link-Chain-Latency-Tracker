@@ -14,3 +14,7 @@ curl-cffi>=0.10
 python-multipart>=0.0.9
 slowapi>=0.1.9
 apscheduler>=3.10
+# enterprise extras (all optional — code degrades honestly without them):
+# pip install "igaming-redirect-pathfinder[enterprise]"
+# prometheus-client>=0.20; opentelemetry-api>=1.28; opentelemetry-sdk>=1.28
+# sentry-sdk>=2.0; redis>=5.0; google-analytics-data>=0.18; google-api-python-client>=2.0

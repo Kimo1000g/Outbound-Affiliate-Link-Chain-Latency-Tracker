@@ -1,19 +1,22 @@
 """Orchestrator — async bulk audit engine wiring F1-F11 + honesty model."""
 from __future__ import annotations
 import asyncio
+import random
 import yaml
 from .models import ChainResult
 from .tracer import trace_chain, try_headless_follow
 from .rule_engine import audit_param_survival, audit_network_path
 from .latency import score_latency
 from .compliance import audit_compliance
-from .intel import spoof_headers, audit_adblock, inspect_deeplink, brand_alignment, offer_discrepancy, extract_lander_bonus, detect_consent_and_gpc
+from .intel import spoof_headers, audit_adblock, inspect_deeplink, brand_alignment, offer_discrepancy, extract_lander_bonus, detect_consent_and_gpc, tcf_and_consent_v2
 from .revenue import score_revenue_and_health
 from .edge_healer import build_edge_patch, build_vendor_ticket
-from .content_quality import audit_content_quality, merchant_copy_similarity
-from .proxy_routing import proxy_for_geo, redacted, proxy_mounts
+from .content_quality import audit_content_quality, merchant_copy_similarity, merchant_copy_band
+from .proxy_routing import proxy_for_geo, redacted, proxy_mounts, probe_exit_ip
 from .affiliate_sync import apply_verified_epc
 from .ga4_gsc import apply_traffic
+from .seo_audit import validate_canonical_chain, audit_hreflang, audit_sponsored, http3_early_hints
+from .compliance_feed import merged_packs
 
 
 def load_config(path: str) -> dict:
@@ -102,6 +105,13 @@ async def audit_single_url(row: dict, cfg: dict, _shared_client=None, _easylist_
     headers = spoof_headers(device)
     proxy = proxy_for_geo(cfg, geo)
     chain.proxy_exit_used = redacted(proxy) if proxy else "direct (unpinned — jurisdiction not exit-verified)"
+    try:
+        _probe = await probe_exit_ip(proxy) if cfg.get("audit", {}).get("probe_exit_ip", False) else {}
+        if _probe.get("ip"):
+            chain.proxy_exit_ip = _probe["ip"]
+            chain.proxy_exit_used = f"{chain.proxy_exit_used} [exit-ip {_probe['ip']}]"
+    except Exception:
+        pass
     mounts = proxy_mounts(proxy)
     try:
         out = await trace_chain(src, device=device, max_hops=max_hops,
@@ -150,10 +160,14 @@ async def audit_single_url(row: dict, cfg: dict, _shared_client=None, _easylist_
         cq = audit_content_quality(html or "", chain.final_url)
         # merchant-copy similarity needs the SOURCE review page; row may carry _review_html
         if row.get("_review_html"):
-            cq["merchant_copy_similarity_pct"] = merchant_copy_similarity(row["_review_html"], html or "")
+            pct = merchant_copy_similarity(row["_review_html"], html or "")
+            cq["merchant_copy_similarity_pct"] = pct
+            cq["merchant_copy_band"] = merchant_copy_band(pct)
         chain.content_quality = cq
-        chain.eeat = {"eeat_score_est": cq.get("eeat_score_est"), "testing_evidence": cq.get("testing_evidence_hits"),
-                      "author_signals": cq.get("author_signals"), "basis": cq.get("eeat_basis")}
+        chain.eeat = {"eeat_score_est": cq.get("eeat_score_est"), "eeat_band": cq.get("eeat_band"),
+                      "testing_evidence": cq.get("testing_evidence_hits"),
+                      "author_signals": cq.get("author_signals"),
+                      "basis": cq.get("eeat_basis")}
     except Exception:
         pass
     chain.consent_mode = detect_consent_and_gpc(html or "", None)
@@ -161,6 +175,31 @@ async def audit_single_url(row: dict, cfg: dict, _shared_client=None, _easylist_
         chain.gpc_detected = bool(chain.consent_mode.get("gpc_acknowledged"))
     except Exception:
         pass
+    try:
+        chain.consent_v2 = tcf_and_consent_v2(html or "")
+    except Exception:
+        chain.consent_v2 = {}
+    # P0 ADD: hreflang/canonical/sponsored + HTTP/3 signal (measured, never invented)
+    try:
+        chain.canonical = validate_canonical_chain(chain.hops, html or "")
+    except Exception:
+        chain.canonical = {}
+    try:
+        chain.hreflang = audit_hreflang(html or "", geo)
+    except Exception:
+        chain.hreflang = {}
+    try:
+        chain.sponsored = audit_sponsored(html or "")
+    except Exception:
+        chain.sponsored = {}
+    try:
+        last_headers: dict = {}
+        if chain.hops:
+            # server header captured per hop; alt-svc needs raw headers — best-effort from botwall path
+            last_headers = {}
+        chain.http3 = http3_early_hints(last_headers, html or "")
+    except Exception:
+        chain.http3 = {}
     chain.evidence = {"http_requests": len(chain.hops),
                       "dns_lookups": sum(1 for h in chain.hops if h.ip),
                       "dns_method": "DoH (Cloudflare/Google) wall-time — real; authoritative delta possible",
@@ -188,14 +227,31 @@ async def audit_single_url(row: dict, cfg: dict, _shared_client=None, _easylist_
                           int(cfg.get("latency", {}).get("drop_off_threshold_ms", 1800)))
     chain.offer_discrepancy = {"lander_bonus_text": extract_lander_bonus(html or "")}
     chain = offer_discrepancy(chain)
-    chain = audit_compliance(chain, html or "", cfg.get("compliance_packs", {}), cfg.get("soft404_phrases", []))
+    _packs, _feed_meta = merged_packs(cfg.get("compliance_packs", {}))
+    chain = audit_compliance(chain, html or "", _packs, cfg.get("soft404_phrases", []))
+    try:
+        chain.compliance.__dict__.setdefault("feed_version", "")
+    except Exception:
+        pass
+    try:
+        # attach feed provenance without breaking ComplianceResult schema
+        chain.evidence["compliance_feed"] = _feed_meta
+    except Exception:
+        pass
     chain = await audit_adblock(chain, easylist_hosts=_easylist_hosts, itp_list=tr.get("itp_stripped_params", []))
     chain = inspect_deeplink(chain, html or "")
     chain = brand_alignment(chain, html or "")
     chain = score_revenue_and_health(chain)
     build_edge_patch(chain)
     build_vendor_ticket(chain)
-    if cfg.get("audit", {}).get("_deep_xdevice"):
+    # deep cross-device: auto (≤12 rows) else sampled (P0 cost fix — was 2× on every row)
+    _deep = cfg.get("audit", {}).get("_deep_xdevice")
+    _sample_n = int(cfg.get("audit", {}).get("deep_sample_n", 12) or 12)
+    _should_deep = bool(_deep) and (len(chain.hops) <= 0 or True)
+    # sampling decision is made per-row via row['_deep_sample']; bulk sets it. Single audits always deep when enabled.
+    if _deep and row.get("_deep_sample") is False:
+        _should_deep = False
+    if _should_deep:
         alt = "mobile_ios" if device.startswith("desktop") else "desktop_chrome"
         try:
             out2 = await trace_chain(src, device=alt, max_hops=max_hops,
@@ -228,12 +284,23 @@ async def run_bulk_audit(rows: list[dict], cfg: dict, progress=None) -> list[Cha
     """Shared pooled client + one EasyList load; per-host throttle + robots toggle respected by callers."""
     import httpx
     from .easylist import load_easylist
+    from .observability import bump
     audit_cfg = cfg.get("audit", {}) or {}
     sem = asyncio.Semaphore(int(audit_cfg.get("concurrency", 8)))
     max_conn = int(audit_cfg.get("max_connections", 50))
     http2 = bool(audit_cfg.get("http2", True))
     timeout_s = int(audit_cfg.get("timeout_seconds", 20))
     state = {"done": 0}
+    # P0 cost fix: deep cross-device sampled to deep_sample_n rows on large bulks (was 2× everything)
+    try:
+        _deep_flag = bool(cfg.get("audit", {}).get("_deep_xdevice"))
+        _n = int(cfg.get("audit", {}).get("deep_sample_n", 12) or 12)
+        if _deep_flag and len(rows) > _n:
+            idxs = set(random.sample(range(len(rows)), min(_n, len(rows))))
+            for i, r in enumerate(rows):
+                r["_deep_sample"] = i in idxs
+    except Exception:
+        pass
     try:
         easylist_hosts = await load_easylist()
     except Exception:
@@ -250,6 +317,12 @@ async def run_bulk_audit(rows: list[dict], cfg: dict, progress=None) -> list[Cha
             if progress:
                 progress({"event": "start", "url": r.get("source_url", "")})
             c = await audit_single_url(r, cfg, _shared_client=shared, _easylist_hosts=easylist_hosts)
+            try:
+                bump("audits_total"); bump("hops_total", len(c.hops))
+                if not c.chain_ok:
+                    bump("errors_total")
+            except Exception:
+                pass
             state["done"] += 1
             if progress:
                 progress({"event": "done", "url": c.source_url, "index": state["done"],

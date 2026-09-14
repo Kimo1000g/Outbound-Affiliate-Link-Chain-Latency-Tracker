@@ -11,13 +11,17 @@ audit:
   retry_backoff_s: 0.8
   per_host_rps: 4
   execution_mode: hybrid        # http_only | hybrid (http + Playwright escalation on bot-wall/JS)
-  user_agent_desktop: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
-  user_agent_mobile_ios: "Mozilla/5.0 (iPhone; CPU iPhone OS 18_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.1 Mobile/15E148 Safari/604.1"
-  user_agent_mobile_android: "Mozilla/5.0 (Linux; Android 15; Pixel 9) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
+  user_agent_desktop: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36"
+  user_agent_mobile_ios: "Mozilla/5.0 (iPhone; CPU iPhone OS 18_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.4 Mobile/15E148 Safari/604.1"
+  user_agent_mobile_android: "Mozilla/5.0 (Linux; Android 15; Pixel 9) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Mobile Safari/537.36"
+  # UA set Q3-2026 — rotate quarterly (stale UA is a bot signal). Canonical set lives in src/redirect_pathfinder/tls_client.py:ROTATING_UAS.
   deep_cross_device: auto
+  deep_sample_n: 12           # P0 cost fix: on bulks >12, deep re-trace sampled to 12 rows (not 2× everything)
   screenshot_evidence: true
-  crux_enabled: false           # set true + CRUX_API_KEY env to enable real CWV
-  psi_enabled: false
+  probe_exit_ip: false        # set true to record VERIFIED egress IP per geo (Bright Data/Oxylabs/Smartproxy)
+  crux_enabled: true          # P0: enabled by default; without CRUX_API_KEY returns honest {available:false}
+  psi_enabled: true           # P0: enabled by default; without PSI_API_KEY uses keyless quota honestly
+  tls_impersonation: chrome131  # P0: curl-cffi impersonate target (chrome131/safari18_0); httpx fallback
 
 tracking_rules:
   required_param_patterns:
@@ -68,8 +72,10 @@ latency:
 
 revenue:
   # No generic default: UNKNOWN until the user supplies EPC/clicks or imports affiliate/GA4 data.
+  # epc_table_hint below is an EXAMPLE-ONLY estimator (±40%), NEVER a verified payout — UI must label ESTIMATED.
   default_epc: null
   default_clicks_30d: null
+  epc_table_is_example_only: true
   revenue_basis_unknown_label: "UNKNOWN — supply EPC + clicks_30d, import affiliate CSV/API, or connect GA4"
   epc_table_hint:
     bet365: 1.85
@@ -108,6 +114,25 @@ easylist:
 monitoring:
   db_path: "output/pathfinder.db"
   retention_runs: 90
+  pg_dsn_env: "PATHFINDER_PG_DSN"   # P0: honor Postgres when set (SQLite is dev fallback)
+  redis_env: "REDIS_URL"            # P0: job store primary when reachable
+
+mcp:
+  enabled: true
+  endpoint: "/mcp"
+  manifest: "/.well-known/mcp.json"
+
+observability:
+  metrics_endpoint: "/metrics"
+  otel_endpoint_env: "OTEL_EXPORTER_OTLP_ENDPOINT"
+  sentry_dsn_env: "SENTRY_DSN"
+
+ssrf:
+  max_fetch_mb: 5
+  allowlist_env: "PATHFINDER_SSRF_ALLOWLIST"
+  note: "private/loopback/link-local/169.254.169.254 blocked + DNS-rebinding check (see ssrf.py)"
+
+compliance_feed_path: "config/compliance_feed.json"
 
 security:
   api_keys: []

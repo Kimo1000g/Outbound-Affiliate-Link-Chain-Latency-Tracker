@@ -1,7 +1,7 @@
 [project]
 name = "igaming-redirect-pathfinder"
-version = "2.0.0"
-description = "Enterprise Outbound Affiliate Link Chain & Latency Tracker (iGaming-Redirect-Pathfinder) — F1-F11 engines, honest timing, GEO/AEO, monitoring"
+version = "3.1.0"
+description = "Enterprise Outbound Affiliate Link Chain & Latency Tracker (iGaming-Redirect-Pathfinder) — F1-F11 engines, honest timing, GEO/AEO, MCP, monitoring"
 requires-python = ">=3.10"
 dependencies = [
   "httpx>=0.27",
@@ -24,6 +24,9 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "respx>=0.22", "anyio>=4.0"]
+enterprise = ["prometheus-client>=0.20", "opentelemetry-api>=1.28", "opentelemetry-sdk>=1.28",
+  "sentry-sdk>=2.0", "redis>=5.0", "google-analytics-data>=0.18", "google-api-python-client>=2.0"]
+
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

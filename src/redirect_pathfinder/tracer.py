@@ -17,34 +17,60 @@ from urllib.parse import urljoin, urlparse
 
 import httpx
 
-from .models import Hop
+from .models import Hop, tcp_tls_canonical
 from .dns_rdap import doh_lookup, rdap_org
 from .botwall import score_botwall
+from .tls_client import ROTATING_UAS, UA_VERSION_NOTE, TLS_IMPERSONATION_NOTE
 
 REDIRECT_STATUSES = {301, 302, 303, 307, 308}
 META_REFRESH_RX = re.compile(r'<meta[^>]+http-equiv=["\']?refresh["\']?[^>]*content=["\']?\s*\d+\s*;\s*url=(.*?)["\']?\s*/?>', re.IGNORECASE)
 JS_REDIRECT_RX = re.compile(r'(window\.location(?:\.href|\.replace)?|location\.href|location\.replace)\s*\(?\s*=[(]?\s*["\']([^"\']+)["\']', re.IGNORECASE)
 
-DEVICE_UAS = {
-    "desktop_chrome": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-    "desktop_edge": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 Edg/131.0.0.0",
-    "mobile_ios": "Mozilla/5.0 (iPhone; CPU iPhone OS 18_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.1 Mobile/15E148 Safari/604.1",
-    "mobile_android": "Mozilla/5.0 (Linux; Android 15; Pixel 9) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36",
-}
+DEVICE_UAS = dict(ROTATING_UAS)
+# Back-compat alias used by intel.spoof_headers: DEVICE_UAS["desktop_chrome"] etc.
+# UA set Q3-2026 (Chrome 132 / Safari 18.4) — rotate quarterly; see tls_client.UA_VERSION_NOTE.
 
 _host_last: dict[str, float] = {}
+_host_locks: dict[str, asyncio.Lock] = {}
+_locks_guard = asyncio.Lock() if False else None  # created lazily (see _get_lock)
+import threading as _th
+_throttle_lock = _th.Lock()
+_MAX_HOSTS_TRACKED = 2000
+
+
+def _get_lock(host: str) -> asyncio.Lock:
+    # asyncio.Lock creation must happen in a running loop; keep a sync guard for map access.
+    with _throttle_lock:
+        lk = _host_locks.get(host)
+        if lk is None:
+            try:
+                lk = asyncio.Lock()
+            except RuntimeError:
+                # no running loop yet — return a fresh lock; caller is inside async ctx so loop exists
+                lk = asyncio.Lock()
+            _host_locks[host] = lk
+            if len(_host_locks) > _MAX_HOSTS_TRACKED:
+                # evict oldest ~20% to bound memory on 500-page crawls (P0 leak fix)
+                for k in list(_host_locks)[: _MAX_HOSTS_TRACKED // 5]:
+                    _host_locks.pop(k, None)
+                for k in list(_host_last)[: _MAX_HOSTS_TRACKED // 5]:
+                    _host_last.pop(k, None)
+        return lk
 
 
 async def _throttle(host: str, rps: float):
+    """Task-safe per-host RPS throttle (P0 fix: was a racy global dict)."""
     if rps <= 0 or not host:
         return
-    gap = 1.0 / rps
-    now = time.perf_counter()
-    last = _host_last.get(host, 0.0)
-    wait = gap - (now - last)
-    if wait > 0:
-        await asyncio.sleep(wait)
-    _host_last[host] = time.perf_counter()
+    lk = _get_lock(host)
+    async with lk:
+        gap = 1.0 / rps
+        now = time.perf_counter()
+        last = _host_last.get(host, 0.0)
+        wait = gap - (now - last)
+        if wait > 0:
+            await asyncio.sleep(wait)
+        _host_last[host] = time.perf_counter()
 
 
 def detect_client_redirects(html: str, base_url: str) -> tuple[str, str]:
@@ -62,16 +88,23 @@ def detect_client_redirects(html: str, base_url: str) -> tuple[str, str]:
 
 
 def _mk_client(timeout_s: int, connect_s: int, max_conn: int, http2: bool, proxy: dict | None) -> httpx.AsyncClient:
+    """P0 fix: httpx.AsyncClient(proxy=) is deprecated/removed — use mounts= transport map."""
     limits = httpx.Limits(max_connections=max_conn, max_keepalive_connections=min(20, max_conn))
     timeout = httpx.Timeout(timeout_s, connect=connect_s)
     kw: dict = {"follow_redirects": False, "timeout": timeout, "verify": True, "limits": limits, "http2": http2}
     if proxy:
-        kw["proxy"] = proxy.get("https://") or proxy.get("http://")
+        try:
+            target = proxy.get("https://") or proxy.get("http://")
+            if target:
+                kw["mounts"] = {"http://": httpx.AsyncHTTPTransport(proxy=target),
+                                "https://": httpx.AsyncHTTPTransport(proxy=target)}
+        except Exception:
+            pass
     try:
         return httpx.AsyncClient(**kw)
     except Exception:
         kw.pop("http2", None)
-        kw.pop("proxy", None)
+        kw.pop("mounts", None)
         return httpx.AsyncClient(**kw)
 
 
@@ -149,7 +182,7 @@ async def trace_chain(start_url: str, device: str = "desktop_chrome",
                 ttfb = (t_headers - t_req) * 1000.0
                 download = (t_end - t_headers) * 1000.0
                 total = (t_end - t_start) * 1000.0
-                tcp_tls_est = max(0.0, total - dns_ms - download - (ttfb * 0.15))
+                tcp_tls_est = tcp_tls_canonical(total, dns_ms, download, ttfb)
                 loc = resp.headers.get("location")
                 server = resp.headers.get("server", "")
                 bw = score_botwall(resp.status_code, dict(resp.headers), (body[:8000].decode("utf-8", errors="ignore") if body else ""))
@@ -196,7 +229,8 @@ async def trace_chain(start_url: str, device: str = "desktop_chrome",
             except Exception:
                 pass
     timing_meta = {"dns": "DoH wall-time (Cloudflare/Google) — real", "ttfb/download/total": "perf_counter — real",
-                   "tcp_tls_est": "max(0,total-dns-download-ttfb*0.15) — ESTIMATED, not socket-measured"}
+                   "tcp_tls_est": "max(0,total-dns-download-ttfb*0.15) — ESTIMATED, not socket-measured; calibrate vs curl -w %{time_appconnect}",
+                   "tls_fingerprint": TLS_IMPERSONATION_NOTE, "ua_set": UA_VERSION_NOTE}
     # Back-compat: old callers expect (hops, html, js, needs_headless_bool). We return dict 4th;
     # orchestrator updated; bool(url) coercion documented. Provide needs_headless inside dict.
     return hops, final_html, js_detected, botwall_agg, timing_meta
@@ -218,9 +252,16 @@ async def try_headless_follow(url: str, device: str = "desktop_chrome", timeout_
             else:
                 ctx_args = {"user_agent": DEVICE_UAS.get(device)}
             ctx = await browser.new_context(**ctx_args)
-            # stealth-lite: hide webdriver flag
+            # stealth: multi-signal hardening (2026 Datadome/PX flag bare webdriver=undefined).
+            # Full fingerprint rotation lives in tls_client (curl-cffi impersonate=chrome131);
+            # Playwright escalation keeps a light-touch script: webdriver, plugins, languages, chrome obj.
             try:
-                await ctx.add_init_script("Object.defineProperty(navigator,'webdriver',{get:()=>undefined})")
+                await ctx.add_init_script(
+                    "Object.defineProperty(navigator,'webdriver',{get:()=>undefined});"
+                    "Object.defineProperty(navigator,'plugins',{get:()=>[1,2,3]});"
+                    "Object.defineProperty(navigator,'languages',{get:()=>['en-US','en']});"
+                    "window.chrome={runtime:{}};"
+                    "Object.defineProperty(navigator,'hardwareConcurrency',{get:()=>8});")
             except Exception:
                 pass
             page = await ctx.new_page()

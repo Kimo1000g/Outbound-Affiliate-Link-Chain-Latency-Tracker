@@ -218,6 +218,12 @@ def _tech_stack(headers: dict, html: str) -> tuple[list[str], str]:
 
 async def profile_site(site_url: str, max_pages: int = 25) -> dict:
     t0 = time.perf_counter()
+    # P0 SSRF guard — block private/metadata targets before any fetch
+    try:
+        from .ssrf import assert_safe_url, MAX_FETCH_BYTES
+        assert_safe_url(site_url)
+    except ValueError as e:
+        return {"error": f"SSRF guard: {e}", "targets": [], "sitemaps_verified": []}
     site_url = _norm(site_url)
     host = urlparse(site_url).hostname or ""
     warnings: list[str] = []
@@ -264,9 +270,16 @@ async def profile_site(site_url: str, max_pages: int = 25) -> dict:
                 continue
         # ---- sitemaps: robots + candidates + recursive expansion + verification ----
         robots = ""
+        robots_disallow: list[str] = []
         try:
             rr = await client.get(site_url + "/robots.txt")
             robots = rr.text if rr.status_code < 400 else ""
+            # P0: respect robots.txt — crawl must honor Disallow (config crawl.respect_robots)
+            import re as _re2
+            for line in robots.splitlines():
+                m = _re2.match(r"\s*Disallow\s*:\s*(\S+)", line, _re2.I)
+                if m:
+                    robots_disallow.append(m.group(1).strip()[:80])
         except Exception:
             pass
         sm_cands = re.findall(r"Sitemap:\s*(\S+)", robots, re.IGNORECASE)
@@ -300,8 +313,14 @@ async def profile_site(site_url: str, max_pages: int = 25) -> dict:
         async def _get(url: str):
             async with sem:
                 try:
+                    # honor robots Disallow prefixes
+                    _path = urlparse(url).path or "/"
+                    if any(_path.startswith(d) for d in robots_disallow if d):
+                        return None
                     r = await client.get(url)
                     ct = r.headers.get("content-type", "")
+                    if len(r.content or b"") > MAX_FETCH_BYTES:
+                        return None  # 5MB SSRF/size cap
                     if r.status_code < 400 and "html" in ct:
                         return {"url": str(r.url), "html": r.text}
                 except Exception:

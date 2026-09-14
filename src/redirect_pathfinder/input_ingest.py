@@ -28,10 +28,15 @@ def _strict_urls(text: str) -> tuple[str, list[str]]:
 async def fetch_sitemap_urls(sitemap_url: str, limit: int = 500) -> list[str]:
     """Strict: HTTP 200 + XML + <loc>; sitemapindex recurses one level. Never trusts dead sitemaps."""
     try:
+        from .ssrf import assert_safe_url, MAX_FETCH_BYTES
+        try:
+            assert_safe_url(sitemap_url)
+        except ValueError:
+            return []
         async with httpx.AsyncClient(timeout=20, follow_redirects=True,
-                                     headers={"User-Agent": "iGaming-Pathfinder/2.0"}) as c:
+                                     headers={"User-Agent": "iGaming-Pathfinder/3.1"}) as c:
             r = await c.get(sitemap_url)
-            if r.status_code != 200:
+            if r.status_code != 200 or len(r.content or b"") > MAX_FETCH_BYTES:
                 return []
             kind, locs = _strict_urls(r.text)
             if kind == "urlset":
@@ -40,8 +45,12 @@ async def fetch_sitemap_urls(sitemap_url: str, limit: int = 500) -> list[str]:
                 out: list[str] = []
                 for child in locs[:10]:
                     try:
+                        try:
+                            assert_safe_url(child)
+                        except ValueError:
+                            continue
                         rc = await c.get(child)
-                        if rc.status_code != 200:
+                        if rc.status_code != 200 or len(rc.content or b"") > MAX_FETCH_BYTES:
                             continue
                         k2, l2 = _strict_urls(rc.text)
                         if k2 == "urlset":

@@ -1,14 +1,15 @@
-"""F11 GEO/AEO — AI-search visibility pre-flight (Lumar GEO parity, iGaming-scoped).
+"""F11 GEO/AEO — AI-search visibility pre-flight (2026-correct).
 
-Checks (all live, honest booleans — no invented citation scores):
-- llms.txt presence + parse (allowed paths, contacts)
-- robots.txt AI-crawler allow: GPTBot, ClaudeBot, PerplexityBot, Google-Extended, CCBot
-- JSON-LD validity: parse application/ld+json blocks, require @context/@type
-- Fact extractability: prices/bonuses/licence strings in structured text vs JS-only
-- Semantic chunking test: can the page split into >5 self-contained 200-800 char chunks?
-- AI Overviews hint: GSC-style regex presence of definitional Q&A blocks (ESTIMATED hint only)
-
-Endpoint: POST /audit/ai-visibility {url}. One module, one endpoint, 2026-relevant.
+GOOGLE MAY 15 2026 CORRECTION (applied here, was wrong before):
+- Google said verbatim AEO/GEO is "still SEO" — IGNORE llms.txt, special AI markup,
+  chunking rewrites as citation factors. Independent data: Limy 515M bot events =
+  408 /llms.txt hits (zero), OtterlyAI 0.1%, ALLMO 0.00106%, SE Ranking 300k XGBoost = no effect.
+- So: llms.txt kept ONLY as "agent-readable infra for Cursor/Claude Code/MCP, NOT a
+  Google citation factor". Chunking kept ONLY as readability diagnostic. JSON-LD kept
+  as extractability aid (Organization/Article/FAQPage help parsing, not ranking).
+- Real GEO per Princeton paper + 2026 data: prompt-level Share of Voice across
+  ChatGPT/Claude/Perplexity/Gemini/AI Overviews + fact density in crawlable HTML +
+  schema + internal links + crawlability. Use sov.run_sov() — never score_est.
 """
 from __future__ import annotations
 import json
@@ -26,15 +27,17 @@ async def audit_ai_visibility(url: str, html: str = "", client: httpx.AsyncClien
     try:
         parsed = urlparse(url)
         origin = f"{parsed.scheme}://{parsed.netloc}"
-        # llms.txt
-        llms = {"present": False, "url": origin + "/llms.txt", "paths": [], "note": ""}
+        # llms.txt — DEMOTED per Google May 2026: agent infra, NOT citation factor
+        llms = {"present": False, "url": origin + "/llms.txt", "paths": [], "note": "",
+                "citation_factor": False,
+                "verdict": "Agent-readable infra for Cursor/Claude Code/MCP — NOT a Google citation factor (Google AI Search Guide May 15 2026: IGNORE llms.txt for Search; 0.1% cite-rate data)"}
         try:
             r = await c.get(origin + "/llms.txt")
             if r.status_code == 200 and len(r.text) > 20:
                 llms["present"] = True
                 llms["paths"] = [l.strip()[:160] for l in r.text.splitlines() if l.strip() and not l.strip().startswith("#")][:20]
             else:
-                llms["note"] = f"HTTP {r.status_code} — llms.txt missing (AI crawlers fall back to HTML)"
+                llms["note"] = f"HTTP {r.status_code} — llms.txt missing (AI coding agents fall back to HTML; Google unaffected)"
         except Exception as e:
             llms["note"] = f"{type(e).__name__} fetching llms.txt"
         # robots AI-bot allow
@@ -61,10 +64,15 @@ async def audit_ai_visibility(url: str, html: str = "", client: httpx.AsyncClien
         facts = _facts(html)
         chunks = _chunks(html)
         return {"url": url, "llms_txt": llms, "robots_ai": robots,
-                "json_ld": {"valid": ld_valid, "types": ld_types[:10], "note": ld_note},
+                "json_ld": {"valid": ld_valid, "types": ld_types[:10], "note": ld_note,
+                            "citation_factor": False,
+                            "verdict": "Extractability aid (Organization/Article/FAQPage help parsing) — NOT a ranking predictor per Google May 2026"},
                 "fact_density": facts, "chunking": chunks,
                 "ai_overviews_hint": _overviews_hint(html),
-                "basis": "measured live HTML/robots/llms.txt — no invented citation probability"}
+                "sov": {"measured": False,
+                        "next": "POST /audit/sov {brand, geo} runs live prompt tests across ChatGPT/Claude/Perplexity/Gemini — the only real Share of Voice",
+                        "warning": "Any score_est below is an HTML readability heuristic, NOT a citation probability. Do not report as GEO score."},
+                "basis": "measured live HTML/robots/llms.txt as INFRA diagnostics — citation Share of Voice requires prompt testing, not HTML scoring"}
     finally:
         if own:
             try:
@@ -111,12 +119,16 @@ def _facts(html: str) -> dict:
                  "price_like": bool(re.search(r"(\$|€|£)\s?\d", text)),
                  "qa_blocks": len(re.findall(r"\?\s+[A-Z]", text[:20000]))}
         density = sum(1 for v in facts.values() if v is True)
+        raw = min(100, density * 25)
+        band = "strong" if raw >= 75 else ("moderate" if raw >= 45 else "weak")
         facts["extractable_in_html"] = len(text) > 500
-        facts["score_est"] = min(100, density * 25)
-        facts["basis"] = "ESTIMATED — structured-fact presence in static HTML (JS-only facts score 0)"
+        facts["score_est"] = raw  # kept for back-compat dashboards; prefer band below
+        facts["band"] = band
+        facts["basis"] = ("ESTIMATED readability band (strong≥75/moderate 45-74/weak<45) — "
+                          "fact density in crawlable HTML aids extraction; it does NOT predict citations (Google May 2026)")
         return facts
     except Exception:
-        return {"score_est": 0, "basis": "parse error"}
+        return {"score_est": 0, "band": "weak", "basis": "parse error"}
 
 
 def _chunks(html: str) -> dict:
@@ -128,7 +140,8 @@ def _chunks(html: str) -> dict:
         paras = [p.get_text(" ", strip=True) for p in soup.find_all(["p", "li", "h2", "h3"]) if len(p.get_text(" ", strip=True)) > 60]
         chunks = [p for p in paras if 200 <= len(p) <= 1200]
         return {"chunks_200_1200": len(chunks), "pass": len(chunks) >= 5,
-                "note": "RAG/AI answers cite self-contained 200-1200 char blocks — 5+ is healthy"}
+                "note": ("Readability diagnostic: 5+ self-contained 200-1200 char blocks help human readers "
+                         "— NOT a Google citation factor (IGNORE chunking rewrites per Google May 2026)")}
     except Exception:
         return {"chunks_200_1200": 0, "pass": False, "note": "parse error"}
 

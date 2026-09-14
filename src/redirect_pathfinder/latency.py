@@ -32,5 +32,6 @@ def score_latency(chain: ChainResult, warn_ms: int = 900, critical_ms: int = 180
     chain.latency = LatencyScore(total_ms=round(total, 1), per_hop_ms=[round(x, 1) for x in per],
                                  dns_total_ms=round(dns, 1), ttfb_total_ms=round(ttfb, 1),
                                  tcp_tls_est_total_ms=round(tcp_est, 1),
-                                 verdict=verdict, dropoff_risk_pct=risk)
+                                 verdict=verdict, dropoff_risk_pct=risk,
+                                 dropoff_band=("low" if risk < 10 else ("elevated" if risk < 35 else "high")))
     return chain

@@ -10,6 +10,17 @@ import uuid
 
 
 def schedule_cfg(cfg: dict) -> dict:
+    # P0: DB-backed schedules win over YAML (YAML rewrite race removed). YAML remains as seed.
+    try:
+        from .job_store import schedule_load
+        db = schedule_load()
+        if db.get("enabled") and db.get("targets"):
+            merged = dict(((cfg.get("monitoring", {}) or {}).get("schedule", {}) or {}))
+            merged.update({"enabled": True, "interval_minutes": db.get("interval_minutes", 60),
+                           "targets": db.get("targets", [])})
+            return merged
+    except Exception:
+        pass
     return ((cfg.get("monitoring", {}) or {}).get("schedule", {}) or {})
 
 

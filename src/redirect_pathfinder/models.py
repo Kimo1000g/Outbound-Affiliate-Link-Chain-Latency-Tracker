@@ -1,7 +1,24 @@
 """Pydantic data models — strict contracts for every hop, chain and finding."""
 from __future__ import annotations
 from typing import Optional
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
+
+
+TCP_TLS_FORMULA = "tcp_tls_est = max(0, total - dns - download - ttfb*0.15) — ESTIMATED, not a socket handshake measurement; calibrate vs curl -w %{time_appconnect}"
+
+
+def tcp_tls_canonical(total_ms: float, dns_ms: float, download_ms: float, ttfb_ms: float) -> float:
+    try:
+        return max(0.0, float(total_ms) - float(dns_ms) - float(download_ms) - (float(ttfb_ms) * 0.15))
+    except Exception:
+        return 0.0
+
+
+def band_0_100(score: float) -> dict:
+    s = max(0.0, min(100.0, float(score or 0)))
+    band = "strong" if s >= 75 else ("moderate" if s >= 45 else "weak")
+    return {"score_est": round(s, 1), "band": band,
+            "basis": "ESTIMATED heuristic band (strong ≥75 / moderate 45-74 / weak <45) — not a Google score"}
 
 
 class Hop(BaseModel):
@@ -15,14 +32,28 @@ class Hop(BaseModel):
     server: Optional[str] = None
     dns_ms: float = 0.0
     doh_ms: float = 0.0
-    tcp_tls_est_ms: float = 0.0  # ESTIMATED via subtraction — see tcp_tls_formula; not a socket measurement
-    tcp_tls_ms: float = 0.0  # back-compat alias of tcp_tls_est_ms
+    tcp_tls_est_ms: float = 0.0  # CANONICAL — ESTIMATED via subtraction; see TCP_TLS_FORMULA
+    tcp_tls_ms: float = 0.0  # DEPRECATED alias, always synced to tcp_tls_est_ms (kept for back-compat dashboards)
     ttfb_ms: float = 0.0
     download_ms: float = 0.0
     total_ms: float = 0.0
     redirect_type: str = "unknown"   # 301/302/303/307/308/js-meta/js-window/final-200/error
     params: dict = Field(default_factory=dict)
     error: Optional[str] = None
+
+    @model_validator(mode="after")
+    def _sync_tcp_tls(self):
+        # Single source of truth: tcp_tls_est_ms. Alias synced both directions.
+        try:
+            if self.tcp_tls_est_ms and not self.tcp_tls_ms:
+                self.tcp_tls_ms = self.tcp_tls_est_ms
+            elif self.tcp_tls_ms and not self.tcp_tls_est_ms:
+                self.tcp_tls_est_ms = self.tcp_tls_ms
+            elif self.tcp_tls_est_ms != self.tcp_tls_ms:
+                self.tcp_tls_ms = self.tcp_tls_est_ms
+        except Exception:
+            pass
+        return self
 
 
 class ParamEvent(BaseModel):
@@ -55,11 +86,14 @@ class LatencyScore(BaseModel):
     dns_total_ms: float = 0.0
     ttfb_total_ms: float = 0.0
     tcp_tls_est_total_ms: float = 0.0
-    tcp_tls_formula: str = "tcp_tls_est = max(0, total - dns - download - ttfb*0.15) — ESTIMATED, not a socket handshake measurement"
+    tcp_tls_formula: str = TCP_TLS_FORMULA
     verdict: str = "fast"  # fast | warn | critical (redirect-chain budget only, NOT page CWV)
     dropoff_risk_pct: float = 0.0
+    dropoff_band: str = "low"  # low | elevated | high — band replaces fake-precision single number
     dropoff_formula: str = "logistic anchored <=500ms ~0-5%, 500-1800ms 5-35%, >1800ms 35-95% — ESTIMATED industry bounce curve"
     redirect_budget_note: str = "Redirect-chain total_ms is server+network hops only. LCP/INP/CLS come only from CrUX/PSI."
+    inp_breakdown: dict = Field(default_factory=dict)  # PSI/web-vitals attribution when available
+    ttfb_budget_note: str = "TTFB ≤800ms good (Google). Redirect TTFB burn steals LCP budget 1:1."
 
 
 class ChainResult(BaseModel):
@@ -115,9 +149,17 @@ class ChainResult(BaseModel):
     device_parity: dict = Field(default_factory=dict)
     screenshots: dict = Field(default_factory=dict)
     proxy_exit_used: str = ""
+    proxy_exit_ip: str = ""  # exit-IP proof when jurisdiction-pinned (else "")
     evidence: dict = Field(default_factory=dict)
     edge_patch: dict = Field(default_factory=dict)
     vendor_ticket: str = ""
+    canonical: dict = Field(default_factory=dict)  # seo_audit.validate_canonical_chain
+    hreflang: dict = Field(default_factory=dict)
+    sponsored: dict = Field(default_factory=dict)
+    http3: dict = Field(default_factory=dict)
+    sov: dict = Field(default_factory=dict)  # prompt-level Share of Voice (measured, never invented)
+    consent_v2: dict = Field(default_factory=dict)  # Consent Mode v2 + TCF 2.2
+    workspace: str = "default"
 
 
 class AuditFinding(BaseModel):

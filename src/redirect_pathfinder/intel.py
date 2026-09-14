@@ -8,15 +8,15 @@ ADBLOCK_TRACKING_HINTS = ["track.", "/track", "affiliate", "click", "pixel", "be
 
 
 def spoof_headers(device: str = "desktop_chrome") -> dict:
-    """2026-current fingerprint set: Chrome 131, Sec-CH-UA-Platform, br encoding, GPC-aware."""
-    from .tracer import DEVICE_UAS
+    """2026-current fingerprint set: Chrome 132 / Safari 18.4, Sec-CH-UA-Platform, br encoding, GPC-aware."""
+    from .tls_client import ROTATING_UAS
     mobile = "mobile" in device
-    sec_ch = ('"Chromium";v="131", "Google Chrome";v="131", "Not-A.Brand";v="99"'
-              if not mobile else '"Chromium";v="131", "Android WebView";v="131"')
+    sec_ch = ('"Chromium";v="132", "Google Chrome";v="132", "Not-A.Brand";v="99"'
+              if not mobile else '"Chromium";v="132", "Android WebView";v="132"')
     platform = '"Android"' if mobile else '"Windows"'
     lang = random.choice(["en-US,en;q=0.9", "en-GB,en;q=0.9", "en-CA,en;q=0.8", "de-DE,de;q=0.8,en;q=0.7"])
     return {
-        "User-Agent": DEVICE_UAS.get(device, DEVICE_UAS["desktop_chrome"]),
+        "User-Agent": ROTATING_UAS.get(device, ROTATING_UAS["desktop_chrome"]),
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/png,*/*;q=0.8",
         "Accept-Language": lang,
         "Accept-Encoding": "gzip, deflate, br",
@@ -31,6 +31,25 @@ def spoof_headers(device: str = "desktop_chrome") -> dict:
         "Upgrade-Insecure-Requests": "1",
         "Cache-Control": "max-age=0",
     }
+
+
+def tcf_and_consent_v2(html: str) -> dict:
+    """Consent Mode v2 + TCF 2.2 string parse (post-3P-cookie attribution requirement)."""
+    blob = (html or "")[:120000]
+    low = blob.lower()
+    # TCF consent string (base64url-ish long token in cookie/localStorage/JS)
+    import re as _re
+    tcf_hit = bool(_re.search(r"euconsent-v2|addtlConsent|__tcfapi|tcfapi|consent-string", low))
+    gtag_consent = "gtag('consent" in low or 'gtag("consent' in low
+    ad_storage = bool(_re.search(r"ad_storage['\"]?\s*:\s*['\"]?(granted|denied)", low))
+    analytics_storage = bool(_re.search(r"analytics_storage['\"]?\s*:\s*['\"]?(granted|denied)", low))
+    s2s = bool(_re.search(r"server-side|server side|s2s|gtm.*server|stape|addingwell", low))
+    return {"tcf2_present": tcf_hit, "consent_mode_v2": gtag_consent,
+            "ad_storage_signal": ad_storage, "analytics_storage_signal": analytics_storage,
+            "s2s_gtm_hint": s2s,
+            "note": ("Consent Mode v2 ad_storage/analytics_storage + TCF 2.2 required for CAPI/S2S postback "
+                     "attribution as 3P cookies die; affiliate _epc_map CSV will break without S2S validation"),
+            "basis": "measured static HTML/JS markers — confirm in DevTools Application tab"}
 
 
 def detect_consent_and_gpc(html: str, headers: dict | None = None) -> dict:

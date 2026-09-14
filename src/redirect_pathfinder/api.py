@@ -22,6 +22,12 @@ from .input_ingest import fetch_sitemap_urls
 from .autofill import profile_site, _check_sitemap
 from .site_content import SECTIONS, NAV
 from .export_pdf import build_pdf
+from .ssrf import assert_safe_url, MAX_FETCH_BYTES
+from .job_store import job_create, job_get, job_log, job_update, schedule_save, schedule_load
+from .observability import metrics_payload, init_tracing
+from .mcp import MCP_MANIFEST, dispatch as mcp_dispatch
+
+init_tracing()
 
 logger = logging.getLogger("pathfinder")
 logging.basicConfig(level=logging.INFO, format='{"ts":"%(asctime)s","lvl":"%(levelname)s","msg":"%(message)s"}')
@@ -220,18 +226,29 @@ def _bundle(chains, cfg) -> dict:
             "health_index": round(sum(c.health_score for c in chains) / max(1, len(chains)), 1)}
 
 
-# ---------------- live jobs (log + SSE stream + sqlite persistence) ----------------
+# ---------------- live jobs (SSE stream + persistent store: Redis/SQLite, survives restart) ----------------
+# P0 fix: was in-memory JOBS dict (lost on restart) + unauthenticated SSE stream.
+# JOBS kept as read-through alias for back-compat; authoritative store is job_store.
 JOBS: dict = {}
+from . import job_store as _JS
+
+def _job(jid: str) -> dict | None:
+    j = _JS.job_get(jid)
+    if j is not None and jid not in JOBS:
+        JOBS[jid] = j
+    return JOBS.get(jid) or j
 
 
 async def _run_job(jid: str, payload: dict):
-    job = JOBS[jid]
+    job = _job(jid) or JOBS.get(jid)
     t0 = job["t0"]
 
     def log(msg: str):
-        job["logs"].append(f"[{_time.perf_counter() - t0:7.1f}s] {_redact(msg)}")
+        m = f"[{_time.perf_counter() - t0:7.1f}s] {_redact(msg)}"
+        job["logs"].append(m)
         if len(job["logs"]) > 2000:
             job["logs"] = job["logs"][-2000:]
+        job_update(jid, logs=job["logs"])
 
     try:
         body = FullAuditIn(**payload)
@@ -292,9 +309,12 @@ async def _run_job(jid: str, payload: dict):
             pass
         job["result"] = out
         job["status"] = "done"
+        job_update(jid, status="done", result=out, done=job.get("done", job.get("total", 0)),
+                   elapsed=round(_time.perf_counter() - t0, 1))
         log(f"complete — revenue at risk ${out['revenue_at_risk']:,.2f} (range ${out['revenue_range'][0]:,.2f}-${out['revenue_range'][1]:,.2f}) · health {out['health_index']}/100")
     except Exception as e:  # noqa: BLE001
         job.update(status="error", error=str(e)[:500])
+        job_update(jid, status="error", error=str(e)[:500])
         log(f"ERROR {e}")
     job["elapsed"] = round(_time.perf_counter() - t0, 1)
 
@@ -302,15 +322,16 @@ async def _run_job(jid: str, payload: dict):
 @app.post("/audit/job")
 async def start_job(body: FullAuditIn, _=Depends(_auth)):
     jid = uuid.uuid4().hex[:12]
-    JOBS[jid] = {"status": "running", "total": 0, "done": 0, "logs": [],
-                 "t0": _time.perf_counter(), "result": None, "error": ""}
+    job = job_create(jid)
+    job["t0"] = _time.perf_counter()
+    JOBS[jid] = job
     asyncio.create_task(_run_job(jid, body.model_dump()))
     return {"job_id": jid}
 
 
 @app.get("/audit/job/{jid}")
-async def job_status(jid: str):
-    job = JOBS.get(jid)
+async def job_status(jid: str, _=Depends(_auth)):
+    job = _job(jid)
     if not job:
         return {"status": "unknown"}
     return {"status": job["status"], "total": job["total"], "done": job["done"],
@@ -320,25 +341,33 @@ async def job_status(jid: str):
 
 
 @app.get("/audit/job/{jid}/stream")
-async def job_stream(jid: str):
-    """SSE live log — replaces polling GET /audit/job/{id} in a loop."""
+async def job_stream(jid: str, request: Request, _=Depends(_auth)):
+    """SSE live log — auth-required (P0 fix), Last-Event-ID resume, persistent backend."""
+    try:
+        last_id = int(request.headers.get("last-event-id", "0") or 0)
+    except Exception:
+        last_id = 0
     async def gen():
-        last = 0
+        last = last_id
+        eid = last_id
         for _ in range(600):
-            job = JOBS.get(jid)
+            job = _job(jid)
             if not job:
-                yield 'data: {"status":"unknown"}\n\n'
+                eid += 1
+                yield f"id: {eid}\ndata: {{\"status\":\"unknown\"}}\n\n"
                 return
             logs = job["logs"][last:]
             last = len(job["logs"])
             payload = json.dumps({"status": job["status"], "done": job["done"], "total": job["total"],
                                   "logs": logs[-50],
                                   "result": job["result"] if job["status"] == "done" else None})
-            yield f"data: {payload}\n\n"
+            eid += 1
+            yield f"id: {eid}\ndata: {payload}\n\n"
             if job["status"] in ("done", "error"):
                 return
             await asyncio.sleep(1.0)
-    return StreamingResponse(gen(), media_type="text/event-stream")
+    return StreamingResponse(gen(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
 # ---------------- docs (auto-updating) ----------------
@@ -411,18 +440,35 @@ async def verify_inputs(body: VerifyIn):
                                  headers={"User-Agent": "Mozilla/5.0"}) as client:
         out["sitemaps"] = []
         for sm in _clean_lines(body.sitemaps)[:20]:
-            out["sitemaps"].append(await _check_sitemap(client, sm))
+            try:
+                assert_safe_url(sm)
+                st = await _check_sitemap(client, sm)
+            except ValueError as e:
+                st = {"url": sm, "live": False, "http": None, "note": f"SSRF guard: {e}"}
+            # cap body reads already handled in _check_sitemap path; note cap here
+            out["sitemaps"].append(st)
 
         async def _url(u: str) -> dict:
             async with sem:
                 d = {"url": u, "live": False, "http": None, "final": "", "note": ""}
                 try:
+                    assert_safe_url(u)
                     r = await client.head(u)
                     if r.status_code in (405, 501):
                         r = await client.get(u)
+                    try:
+                        cl = int(r.headers.get("content-length", "0") or 0)
+                        if cl > MAX_FETCH_BYTES:
+                            d.update(http=r.status_code, final=str(r.url), live=False,
+                                     note=f"body {cl} bytes exceeds 5MB cap — NOT fetched")
+                            return d
+                    except Exception:
+                        pass
                     d.update(http=r.status_code, final=str(r.url),
                              live=r.status_code < 400,
                              note="LIVE" if r.status_code < 400 else f"HTTP {r.status_code} — NOT reachable")
+                except ValueError as e:
+                    d["note"] = f"SSRF guard: {e}"
                 except Exception as e:  # noqa: BLE001
                     d["note"] = f"{type(e).__name__} — NOT reachable"
                 return d
@@ -431,8 +477,13 @@ async def verify_inputs(body: VerifyIn):
         async def _feed(f: str) -> dict:
             async with sem:
                 try:
+                    assert_safe_url(f)
                     r = await client.get(f)
+                    if len(r.content or b"") > MAX_FETCH_BYTES:
+                        return {"url": f, "live": False, "http": r.status_code, "note": "exceeds 5MB cap"}
                     return {"url": f, "live": r.status_code < 400, "http": r.status_code}
+                except ValueError as e:
+                    return {"url": f, "live": False, "http": None, "note": f"SSRF guard: {e}"}
                 except Exception:
                     return {"url": f, "live": False, "http": None}
         out["feeds"] = await asyncio.gather(*[_feed(f) for f in _clean_lines(body.feeds)[:20]])
@@ -466,14 +517,75 @@ async def verify_inputs(body: VerifyIn):
 async def ai_visibility(body: dict, _=Depends(_auth)):
     from .geo_ai import audit_ai_visibility
     url = body.get("url", "")
+    try:
+        assert_safe_url(url)
+    except ValueError as e:
+        return {"url": url, "error": f"SSRF guard: {e}"}
     html = ""
     try:
         async with httpx.AsyncClient(timeout=15, follow_redirects=True, headers={"User-Agent": "Mozilla/5.0"}) as c:
             r = await c.get(url)
-            html = r.text[:300000]
+            raw = r.content or b""
+            if len(raw) > MAX_FETCH_BYTES:
+                return {"url": url, "error": "page exceeds 5MB fetch cap — NOT fetched (SSRF/size guard)"}
+            html = raw.decode("utf-8", errors="ignore")[:300000]
     except Exception as e:
         return {"url": url, "error": f"{type(e).__name__}: {e}"}
     return await audit_ai_visibility(url, html)
+
+
+@app.post("/audit/sov")
+async def sov_endpoint(body: dict, _=Depends(_auth)):
+    """Prompt-level Share of Voice (real GEO). Body: {brand, geo, prompts?}."""
+    from .sov import run_sov
+    return await run_sov(body.get("brand", ""), body.get("geo", "US-NJ"), body.get("prompts"))
+
+
+@app.post("/utils/postback-validate")
+async def postback_validate(body: dict, _=Depends(_auth)):
+    """S2S postback validator (Voluum parity): checks txid/clickid + payout presence."""
+    from .affiliate_sync import validate_postback
+    return validate_postback(body.get("url", ""))
+
+
+@app.get("/utils/affiliate-live")
+async def affiliate_live(platform: str = Query("everflow"), _=Depends(_auth)):
+    """Live affiliate API status/pull (PRIMARY) — CSV import is fallback."""
+    from .affiliate_sync import pull_platform_summary
+    return await pull_platform_summary(platform)
+
+
+@app.get("/utils/traffic-live")
+async def traffic_live(site: str = Query(""), days: int = 28, _=Depends(_auth)):
+    """Live GA4 + GSC pulls (PRIMARY) — CSV import is fallback."""
+    from .ga4_gsc import ga4_live_clicks, gsc_live_clicks
+    return {"ga4": await ga4_live_clicks([], days), "gsc": await gsc_live_clicks(site, days)}
+
+
+@app.get("/metrics")
+async def metrics():
+    body, ctype = metrics_payload()
+    return Response(content=body, media_type=ctype)
+
+
+@app.get("/.well-known/mcp.json")
+async def mcp_manifest():
+    return MCP_MANIFEST
+
+
+@app.post("/mcp")
+async def mcp_endpoint(body: dict, _=Depends(_auth)):
+    """MCP JSON-RPC 2.0: {jsonrpc, id, method: tools/list|tools/call, params}."""
+    method = body.get("method", "")
+    if method == "tools/list":
+        return {"jsonrpc": "2.0", "id": body.get("id"), "result": {"tools": MCP_MANIFEST["tools"]}}
+    if method == "tools/call":
+        p = body.get("params", {}) or {}
+        cfg = load_config(CFG_PATH)
+        res = await mcp_dispatch(p.get("name", ""), p.get("arguments", {}) or {}, cfg)
+        return {"jsonrpc": "2.0", "id": body.get("id"), "result": res}
+    return {"jsonrpc": "2.0", "id": body.get("id"),
+            "error": {"code": -32601, "message": f"unknown method {method}"}}
 
 
 @app.get("/utils/crux")
@@ -514,15 +626,13 @@ async def ga4_status_ep():
 
 @app.post("/audit/schedule")
 async def audit_schedule(body: dict, _=Depends(_auth)):
-    """Save/update the recurring monitor target list (APScheduler interval in config)."""
-    cfg = load_config(CFG_PATH)
-    mon = cfg.setdefault("monitoring", {}).setdefault("schedule", {})
-    mon.update({"enabled": True, "interval_minutes": int(body.get("interval_minutes", 60)),
-                "targets": body.get("targets", [])})
-    with open(CFG_PATH, "w", encoding="utf-8") as f:
-        import yaml
-        yaml.safe_dump(cfg, f, sort_keys=False)
-    return {"scheduled": True, "interval_minutes": mon["interval_minutes"], "targets": len(mon["targets"])}
+    """Save/update the recurring monitor target list (DB-backed — P0 fix, was YAML rewrite race)."""
+    return schedule_save(int(body.get("interval_minutes", 60)), body.get("targets", []))
+
+
+@app.get("/audit/schedule")
+async def audit_schedule_get(_=Depends(_auth)):
+    return schedule_load()
 
 
 @app.get("/monitor/runs")
@@ -545,6 +655,12 @@ def root():
     return RedirectResponse("/app/")
 
 
+@app.get("/dashboard", include_in_schema=False)
+def dashboard_deprecated():
+    """Legacy dashboard/dashboard.html duplicate — canonical is frontend/ 3-page app (P0 dedupe)."""
+    return RedirectResponse("/app/", status_code=301)
+
+
 @app.get("/health")
 def health():
     try:
@@ -552,8 +668,15 @@ def health():
         pw = True
     except Exception:
         pw = False
-    return {"status": "ok", "service": "outbound-affiliate-link-chain-latency-tracker", "version": "3.0.0",
-            "playwright": pw, "rate_limit": _RATE_OK}
+    try:
+        import curl_cffi  # type: ignore
+        tls = True
+    except Exception:
+        tls = False
+    return {"status": "ok", "service": "outbound-affiliate-link-chain-latency-tracker", "version": "3.1.0",
+            "playwright": pw, "tls_impersonation": tls, "rate_limit": _RATE_OK,
+            "pg_dsn_configured": bool(os.environ.get("PATHFINDER_PG_DSN")),
+            "redis_configured": bool(os.environ.get("REDIS_URL"))}
 
 
 @app.get("/config/defaults")
@@ -572,12 +695,20 @@ def config_defaults(_=Depends(_auth)):
 
 @app.get("/utils/sitemap")
 async def expand_sitemap(url: str = Query(...), limit: int = 100):
+    try:
+        assert_safe_url(url)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=f"SSRF guard: {e}")
     urls = await fetch_sitemap_urls(url, limit=limit)
     return {"sitemap": url, "count": len(urls), "urls": urls}
 
 
 @app.post("/utils/autofill")
 async def autofill_from_site(body: AutofillIn, _=Depends(_auth)):
+    try:
+        assert_safe_url(body.site_url)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=f"SSRF guard: {e}")
     return await profile_site(body.site_url, max_pages=max(1, min(body.max_pages, 500)))
 
 

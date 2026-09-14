@@ -2,9 +2,9 @@
 
 **Enterprise revenue-guarding engine for iGaming affiliate redirect chains — live multi-hop tracing, param-loss fingerprinting, latency profiling, compliance guardianship and edge auto-healing.**
 
-![Python](https://img.shields.io/badge/Python-3.10%2B-blue) ![FastAPI](https://img.shields.io/badge/FastAPI-REST%20%2B%20Web%20App-green) ![Playwright](https://img.shields.io/badge/Headless-Chromium%20installed%20(Docker)-orange) ![Tests](https://img.shields.io/badge/pytest-22%20passing-brightgreen) ![License](https://img.shields.io/badge/license-MIT-lightgrey)
+![Python](https://img.shields.io/badge/Python-3.10%2B-blue) ![FastAPI](https://img.shields.io/badge/FastAPI-REST%20%2B%20Web%20App%20%2B%20MCP-green) ![Tests](https://img.shields.io/badge/pytest-22%20passing-brightgreen) ![License](https://img.shields.io/badge/license-MIT-lightgrey)
 
-> **v3.0 enterprise:** hybrid mode is real (Docker installs Chromium; `playwright_available` reported per chain), `tcp_tls` is labelled `tcp_tls_est_ms` (subtraction, formula published), revenue is UNKNOWN until inputs/imports (ESTIMATED ±40% range / VERIFIED ±15%), redirect-ms is never labelled CWV (CrUX/PSI via `/utils/crux`), inputs are 3 steps (Advanced collapsible), jobs stream over SSE + persist to SQLite with diffs. Quickstart with Docker: `docker compose up --build` → http://localhost:8099/app/ (set `PATHFINDER_API_KEYS` to require API keys).
+> **v3.1.0 enterprise-hardened:** SSRF guard on all server-side fetches (private/link-local/169.254 blocked + 5MB cap) · auth-required SSE with Last-Event-ID resume + persistent job store (Redis → SQLite, survives restart) · schedules in DB (no YAML race) · curl-cffi TLS impersonation wired (was installed, unused) + task-safe per-host throttle · `tcp_tls` canonical single formula · UA rotated to Chrome 132 / Safari 18.4 · MCP server (`POST /mcp` + `/.well-known/mcp.json`: trace_chain/param_audit/sla_matrix/verify_inputs/ai_visibility/crux_lookup) · live affiliate APIs (Everflow/Cellxpert/IA/NetRefer/MyAff + S2S postback validator with sub1-10/adv1-10) · live GA4 Data API + GSC Search Analytics (CSV = fallback) · prompt-level Share-of-Voice (`POST /audit/sov`) · CrUX history + PSI INP attribution + web-vitals RUM snippet (CrUX/PSI on by default, honest unavailable without keys) · canonical/hreflang/rel=sponsored + HTTP/3 signal audits · Consent Mode v2 + TCF 2.2 parsing · E-E-A-T/dropoff as bands (no fake-precision scores) · F11 corrected per Google May 2026 (llms.txt = agent infra, NOT citation factor) · versioned compliance feed · `/metrics` (Prometheus) + OTel/Sentry hooks · workspaces + key scopes · deep-trace sampling on large bulks. Quickstart with Docker: `docker compose up --build` → http://localhost:8099/app/ (set `PATHFINDER_API_KEYS` to require API keys).
 
 ![Tool hero — inputs page with site auto-fill](docs/screenshots/01-hero-autofill.png)
 
@@ -173,7 +173,9 @@ Live-EasyList ad-block simulation per chain · mobile app-scheme/store/universal
 
 ### F11 · GEO/AEO AI-visibility + scheduled monitoring
 
-`POST /audit/ai-visibility` (llms.txt, robots AI-bot allow, JSON-LD validity, fact density, RAG chunking) · APScheduler + SQLite runs with new-broken/fixed/health-delta diffs (`GET /monitor/runs`, `/monitor/diff`) · Slack/Teams webhooks that actually POST · Jira/Linear push (`POST /export/jira`):
+`POST /audit/ai-visibility` (robots AI-bot allow, JSON-LD extractability aid, fact-density **band**, readability chunking — all as infra diagnostics) · `POST /audit/sov` (live prompt tests = the only real Share-of-Voice) · APScheduler + SQLite runs with new-broken/fixed/health-delta diffs (`GET /monitor/runs`, `/monitor/diff`) · Slack/Teams webhooks that actually POST · Jira/Linear push (`POST /export/jira`):
+
+> **2026 correction (Google AI Search Guide May 15 2026):** llms.txt is agent-readable infra for Cursor/Claude Code/MCP, **NOT** a Google citation factor. Chunking is a readability diagnostic, not a ranking predictor. This tool reports bands + confidence intervals, never invented citation probabilities.
 
 ![F10 offers](docs/screenshots/19-analysis-f10-offers.png)
 
@@ -225,7 +227,13 @@ Interactive docs at `GET /docs`. Key endpoints:
 
 | Endpoint | Purpose |
 |----------|---------|
-| `POST /audit/job` + `GET /audit/job/{id}` + `GET /audit/job/{id}/stream` | Async run with live log (polling + SSE stream) |
+| `POST /audit/job` + `GET /audit/job/{id}` (auth) + `GET /audit/job/{id}/stream` (auth SSE, Last-Event-ID resume) | Async run with persistent log (Redis → SQLite, survives restart) |
+| `POST /mcp` + `GET /.well-known/mcp.json` | MCP server for Claude Code / Cursor (trace_chain, param_audit, sla_matrix, verify_inputs, ai_visibility, crux_lookup) |
+| `POST /audit/sov` | Prompt-level Share-of-Voice across ChatGPT/Claude/Perplexity/Gemini (real GEO — HTML scores can't predict citations) |
+| `POST /utils/postback-validate` | S2S postback check (txid/clickid + payout, Everflow sub1-10/adv1-10) |
+| `GET /utils/affiliate-live?platform=` + `GET /utils/traffic-live` | Live affiliate / GA4+GSC pulls (PRIMARY — CSV imports are fallback) |
+| `GET /metrics` | Prometheus metrics + OTel/Sentry hooks |
+| `POST /audit/schedule` + `GET /audit/schedule` (DB-backed) + `GET /monitor/runs` + `GET /monitor/diff` | Recurring monitoring + diffs |
 | `POST /audit/full` | Synchronous full run (targets + all layer settings) |
 | `POST /audit/bulk`, `POST /audit` | Row-list and single-URL audits |
 | `POST /audit/ai-visibility` | F11 GEO/AEO check for one URL |
@@ -270,27 +278,36 @@ Open **http://localhost:8099** → Page 1 inputs (3 steps) → Run → Page 2 an
 
 ```
 cli.py                          CLI (audit / serve)
-config/enterprise.yaml          tracking regex, networks, geo/compliance packs, thresholds
+config/enterprise.yaml          tracking regex, networks, geo/compliance packs, thresholds, MCP/metrics/SSRF sections
+config/compliance_feed.json     versioned helplines + badges (feed wins over YAML drift)
 frontend/                       3-page web app (index/analysis/outputs/info + shared JS/CSS)
 src/redirect_pathfinder/
-  tracer.py                     pooled HTTP/2 hop engine (DoH DNS, honest tcp_tls_est, bot-wall score, proxy exits)
+  tracer.py                     pooled HTTP/2 hop engine (DoH DNS, canonical tcp_tls_est, bot-wall score, mounts-based proxy, task-safe throttle, TLS note)
+  tls_client.py                 curl-cffi impersonation (chrome131/safari18) + quarterly UA rotation (Chrome 132 / Safari 18.4)
+  ssrf.py                       SSRF guard (private/link-local/169.254 blocked, DNS-rebinding check, 5MB cap)
   dns_rdap.py / botwall.py      DoH + RDAP attribution / WAF scoring (CF/Datadome/Akamai/PX)
   rule_engine.py                param survival + network-path audits
-  latency.py / compliance.py    honest drop-off curve / 9-geo packs + age-gate + reputation-abuse
-  intel.py / easylist.py        adblock(ITP)/deep-link/brand/offer + live EasyList + consent/GPC
-  content_quality.py / geo_ai.py SpamBrain EEAT pre-flight / F11 AI-visibility (llms.txt, robots-AI, JSON-LD)
-  crux_psi.py / screenshots.py  honest page CWV (CrUX/PSI) / Playwright screenshot evidence
-  proxy_routing.py              per-geo proxy abstraction (redacted logging)
-  persistence.py / monitoring.py SQLite runs + diffs / APScheduler always-on monitor
-  affiliate_sync.py / ga4_gsc.py affiliate CSV/API + GA4/GSC CSV imports (VERIFIED revenue)
+  latency.py / compliance.py    honest drop-off curve (+band) / 9-geo packs + age-gate + reputation-abuse
+  intel.py / easylist.py        adblock(ITP)/deep-link/brand/offer + Consent Mode v2/TCF2.2 + live EasyList + consent/GPC
+  content_quality.py / geo_ai.py SpamBrain bands + scaled-content + merchant-copy bands / F11 infra diagnostics (Google-May-2026-correct)
+  sov.py                        prompt-level Share-of-Voice harness (ChatGPT/Claude/Perplexity/Gemini)
+  crux_psi.py / screenshots.py  honest page CWV (CrUX+history/PSI+INP attribution/RUM snippet) / screenshot evidence
+  seo_audit.py                  canonical/hreflang/rel=sponsored + HTTP/3/Early-Hints/bfcache
+  proxy_routing.py              per-geo proxy abstraction + exit-IP probe (redacted logging)
+  persistence.py / monitoring.py SQLite runs + diffs (+schedules table) / APScheduler (DB schedule wins)
+  job_store.py                  persistent jobs (Redis → SQLite, SSE resume)
+  mcp.py                        MCP tools + manifest (trace_chain/param_audit/sla_matrix/verify/ai_visibility/crux)
+  observability.py / multitenant.py /metrics + OTel/Sentry / workspaces + key scopes
+  affiliate_sync.py / ga4_gsc.py live affiliate APIs + S2S validator + live GA4/GSC (CSV fallback)
+  compliance_feed.py            versioned regulator feed loader
   ticketing.py                  Jira/Linear/ClickUp real POST
-  autofill.py                   deep site profiler (identity, sitemaps, crawl, wayback)
-  orchestrator.py               bulk engine + forensics + evidence + cross-device parity
+  autofill.py                   deep site profiler (SSRF-guarded, robots-respecting, 5MB-capped, hreflang-aware)
+  orchestrator.py               bulk engine + forensics + evidence + sampled cross-device parity
   revenue.py / edge_healer.py   UNKNOWN/ESTIMATED/VERIFIED ranges + SLA + Worker/Vercel/WP patches
   alerting_export.py            alerts (POST), CSV/JSON/JIRA exports
   site_content.py               docs single source of truth
   export_pdf.py                 real PDF generator (ReportLab, ranges + F11/CWV honesty)
-  api.py                        FastAPI: jobs+SSE, F11, CWV, imports, monitoring, auth/rate-limit, PDF
+  api.py                        FastAPI: auth jobs+SSE, MCP, SOV, live imports, monitoring, SSRF guards, PDF
 Dockerfile / docker-compose.yml Chromium image + api/redis/postgres stack · .github/workflows/ci.yml CI
 samples/urls.csv                demo targets · samples/autofill-demo.html  profiler fixture
 tests/test_pathfinder.py        9 deterministic unit tests
@@ -329,7 +346,7 @@ Zero lost commissions · higher click-to-register CR · 90%+ QA automation · re
 
 ## 16 · Roadmap
 
-~~Residential-proxy pool connectors~~ ✅ shipped (per-geo `proxy_exit`) · ~~affiliate API live sync~~ ✅ shipped (CSV/API imports) · ~~GA4/Search Console ingestion~~ ✅ shipped (CSV imports + status endpoint) · ~~scheduled monitoring + diff alerts~~ ✅ shipped (APScheduler + SQLite + webhooks) · multi-user workspaces · Postgres/Redis production backend (compose ships it; app auto-uses SQLite until `PATHFINDER_PG_DSN` is set) · CrUX-gated LCP-budget enforcement.
+~~Residential-proxy pool connectors~~ ✅ shipped (per-geo `proxy_exit` + exit-IP probe) · ~~affiliate API live sync~~ ✅ shipped (live pulls PRIMARY, CSV fallback) · ~~GA4/Search Console ingestion~~ ✅ shipped (live Data API + GSC PRIMARY, CSV fallback) · ~~scheduled monitoring + diff alerts~~ ✅ shipped (APScheduler + SQLite + webhooks, DB-backed schedules) · ~~MCP server~~ ✅ shipped (`POST /mcp`) · ~~SSRF guard + auth SSE + persistent jobs~~ ✅ shipped · ~~F11 Google-May-2026 correction + SOV~~ ✅ shipped · multi-user workspaces (scopes shipped; Postgres RLS next) · CrUX-gated LCP-budget enforcement.
 
 ---
 
