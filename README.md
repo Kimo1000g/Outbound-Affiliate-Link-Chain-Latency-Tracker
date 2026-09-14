@@ -2,11 +2,36 @@
 
 **Enterprise revenue-guarding engine for iGaming affiliate redirect chains — live multi-hop tracing, param-loss fingerprinting, latency profiling, compliance guardianship and edge auto-healing.**
 
-![Python](https://img.shields.io/badge/Python-3.10%2B-blue) ![FastAPI](https://img.shields.io/badge/FastAPI-REST%20%2B%20Web%20App%20%2B%20MCP-green) ![Tests](https://img.shields.io/badge/pytest-22%20passing-brightgreen) ![License](https://img.shields.io/badge/license-MIT-lightgrey)
+[![Live tool](https://img.shields.io/badge/live-tool-open-brightgreen)](https://outbound-affiliate-link-chain-latency.onrender.com/) ![Python](https://img.shields.io/badge/Python-3.10%2B-blue) ![FastAPI](https://img.shields.io/badge/FastAPI-REST%20%2B%20Web%20App%20%2B%20MCP-green) ![Tests](https://img.shields.io/badge/pytest-22%20passing-brightgreen) ![License](https://img.shields.io/badge/license-MIT-lightgrey)
 
-**🚀 Live tool: https://outbound-affiliate-link-chain-latency.onrender.com/** — open it, paste URLs, run the audit. No install needed.
+> **🚀 Try it live — no install:** https://outbound-affiliate-link-chain-latency.onrender.com/
+> Paste affiliate URLs → **Run** → Page 2 analysis → Page 3 outputs. Self-host with `docker compose up --build` → http://localhost:8099/.
 
-> **v3.2.0 enterprise-hardened (this commit):** TLS impersonation is now the PRIMARY per-hop transport (curl-cffi Chrome JA3/H2, pooled-httpx fallback, `per_hop_via` flag on every hop) · per-hop alt-svc capture feeds real `http3_advertised` (no more false negatives) · scoped API-key auth (`audit`/`mcp`/`export`/`admin` via `key:scopes:workspace`) + 60/min per-key rate limit + 2 MB body cap on all server-fetch endpoints · SSRF `assert_safe_url` on every source/sitemap/pasted URL · rule engine unknown-state (`params_intact=None`, mid-chain injection detection, duplicate-preserving params) · edge patches require explicit `fallback_url` (no `example.com` default, JS-escaped, subid/clickid passthrough) · TCF 2.3 parser (2.2 flagged deprecated) · canonical normalization + 9-geo hreflang map + source-vs-final `rel=sponsored` audit · SOV live on all 4 providers (OpenAI/Anthropic/Perplexity/Gemini) with cost caps + 7-day cache + `perplexity-only` partial label · GSC 25k pagination + quota backoff + GA4↔GSC join · HMAC-signed webhooks with correlation IDs · OTel spans on trace/audit fan-out · explicit Playwright fork rule recorded per chain · CrUX history + LCP-budget gate · workspace cost caps + Docker-secrets helper · idempotent runs + 90-run retention + `DELETE /monitor/runs/{id}`. Carried over from v3.1.0:SSRF guard on all server-side fetches (private/link-local/169.254 blocked + 5MB cap) · auth-required SSE with Last-Event-ID resume + persistent job store (Redis → SQLite, survives restart) · schedules in DB (no YAML race) · `tcp_tls` canonical single formula · UA rotated to Chrome 132 / Safari 18.4 · MCP server (`POST /mcp` + `/.well-known/mcp.json`: trace_chain/param_audit/sla_matrix/verify_inputs/ai_visibility/crux_lookup) · live affiliate APIs (Everflow/Cellxpert/IA/NetRefer/MyAff + S2S postback validator with sub1-10/adv1-10) · live GA4 Data API + GSC Search Analytics (CSV = fallback) · prompt-level Share-of-Voice (`POST /audit/sov`) · CrUX history + PSI INP attribution + web-vitals RUM snippet (CrUX/PSI on by default, honest unavailable without keys) · canonical/hreflang/rel=sponsored + HTTP/3 signal audits · Consent Mode v2 + TCF 2.3 parsing · E-E-A-T/dropoff as bands (no fake-precision scores) · F11 corrected per Google May 2026 (llms.txt = agent infra, NOT citation factor) · versioned compliance feed · `/metrics` (Prometheus) + OTel/Sentry hooks · workspaces + key scopes · deep-trace sampling on large bulks. Quickstart with Docker: `docker compose up --build` → http://localhost:8099/ (the tool lives at the domain root; `/app/` kept as an alias. Set `PATHFINDER_API_KEYS` to require API keys).
+## What's new in v3.2.0
+
+**Tracing & SEO forensics**
+- TLS impersonation (curl-cffi Chrome JA3/H2) is the **primary** per-hop transport, pooled-httpx fallback, actual transport recorded per hop (`timing_meta.per_hop_via`)
+- Per-hop `alt-svc` capture → `http3_advertised` reflects measured headers, not hardcoded `false`
+- Rule engine **unknown-state**: clean links report `params_intact: null` (never FAIL), mid-chain injection flagged, duplicate query keys preserved
+- Canonical normalization (www/case/slash) + **9-geo hreflang map** + source-vs-final `rel=sponsored` audit
+- **TCF 2.3** parser (2.2 strings flagged deprecated per the Mar 1 2026 mandate)
+
+**Security & ops**
+- Scoped API keys (`key:scopes:workspace` — `audit`/`mcp`/`export`/`admin`), 60/min per-key rate limit (429), 2 MB body cap (413)
+- SSRF `assert_safe_url` on **every** server-fetch path (source/sitemap/pasted URLs, MCP tools, tracer)
+- Edge patches require an explicit `fallback_url` (no `example.com` default; JS-escaped; `subid`/`clickid`/`btag` passthrough)
+- Idempotent runs, enforced 90-run retention, `DELETE /monitor/runs/{id}`; scheduler reloads targets each tick under an overlap guard; Redis-primary job store with wall-clock timestamps
+- HMAC-signed webhooks with correlation IDs; OTel spans on trace/audit fan-out; explicit Playwright fork rule recorded per chain (`evidence.render_fork`)
+
+**GEO / Share-of-Voice**
+- `POST /audit/sov` now calls **all 4 providers live** (OpenAI/Anthropic/Perplexity/Gemini) with per-provider caps, 7-day cache and `perplexity-only` partial labelling
+- GSC 25k-row pagination + quota backoff, GA4↔GSC join, CrUX history + **LCP-budget gate**, workspace cost caps + Docker-secrets helper
+
+<details>
+<summary>Carried over from v3.1.0</summary>
+
+SSRF guard (private/link-local/169.254 blocked + 5MB cap) · auth-required SSE with Last-Event-ID resume + persistent jobs · DB-backed schedules · canonical `tcp_tls_est` formula · Chrome 132 / Safari 18.4 UAs · MCP server (`POST /mcp` + `/.well-known/mcp.json`) · live affiliate APIs + S2S validator · live GA4 + GSC (CSV fallback) · Consent Mode v2 · E-E-A-T/dropoff **bands** (never fake scores) · F11 corrected per Google May 2026 (`llms.txt` = agent infra, NOT a citation factor) · versioned compliance feed · `/metrics` + OTel/Sentry hooks · deep-trace sampling on large bulks.
+</details>
 
 ![Tool hero — inputs page with site auto-fill](docs/screenshots/01-hero-autofill.png)
 
@@ -20,23 +45,24 @@ This tool continuously **crawls, executes, simulates and audits multi-hop affili
 
 ## Table of contents
 
-1. [3-page workflow](#1--3-page-workflow)
-2. [Layer 0 — auto-fill any website](#2--layer-0--auto-fill-any-website-url)
-3. [The 10 input layers in 3 steps](#3--the-10-input-layers-in-3-steps)
-4. [Input verification engine](#4--input-verification-engine)
-5. [Live log + timer](#5--live-log--timer)
-6. [The 12 engines (F1–F11 + monitoring)](#6--the-12-engines-f1f11--monitoring)
-7. [The 9 outputs (O1–O9)](#7--the-9-outputs-o1o9)
-8. [Documentation pages (auto-updating)](#8--documentation-pages-auto-updating)
-9. [REST API](#9--rest-api)
-10. [Quickstart](#10--quickstart)
-11. [Architecture & file map](#11--architecture--file-map)
-12. [Configuration reference](#12--configuration-reference)
-13. [Verification & honesty model](#13--verification--honesty-model)
-14. [Test report](#14--test-report)
-15. [Business impact](#15--business-impact)
-16. [Roadmap](#16--roadmap)
-17. [Contributing & license](#17--contributing--license)
+1. [What's new in v3.2.0](#whats-new-in-v320)
+2. [3-page workflow](#1--3-page-workflow)
+3. [Layer 0 — auto-fill any website](#2--layer-0--auto-fill-any-website-url)
+4. [The 10 input layers in 3 steps](#3--the-10-input-layers-in-3-steps)
+5. [Input verification engine](#4--input-verification-engine)
+6. [Live log + timer](#5--live-log--timer)
+7. [The 12 engines (F1–F11 + monitoring)](#6--the-12-engines-f1f11--monitoring)
+8. [The 9 outputs (O1–O9)](#7--the-9-outputs-o1o9)
+9. [Documentation pages (auto-updating)](#8--documentation-pages-auto-updating)
+10. [REST API](#9--rest-api)
+11. [Quickstart](#10--quickstart)
+12. [Architecture & file map](#11--architecture--file-map)
+13. [Configuration reference](#12--configuration-reference)
+14. [Verification & honesty model](#13--verification--honesty-model)
+15. [Test report](#14--test-report)
+16. [Business impact](#15--business-impact)
+17. [Roadmap](#16--roadmap)
+18. [Contributing & license](#17--contributing--license)
 
 ---
 
@@ -173,13 +199,13 @@ Fingerprint-spoofed headers, proxy rotation and headless escalation status per c
 
 Live-EasyList ad-block simulation per chain · mobile app-scheme/store/universal-link verdicts · expected-vs-rival brand alignment · on-site vs lander bonus comparison · thin-affiliate + merchant-copy similarity + site-reputation-abuse pre-flight (SpamBrain 2026) · Consent Mode v2 + **TCF 2.3** (2.2 strings flagged deprecated per the Mar 1 2026 mandate):
 
+![F10 offers](docs/screenshots/19-analysis-f10-offers.png)
+
 ### F11 · GEO/AEO AI-visibility + scheduled monitoring
 
 `POST /audit/ai-visibility` (robots AI-bot allow, JSON-LD extractability aid, fact-density **band**, readability chunking — all as infra diagnostics) · `POST /audit/sov` (live prompt tests on **all 4 providers** — OpenAI/Anthropic/Perplexity/Gemini — with per-provider caps, 7-day cache and `perplexity-only` partial labelling = the only real Share-of-Voice) · APScheduler + SQLite runs with new-broken/fixed/health-delta diffs (`GET /monitor/runs`, `GET /monitor/diff`, `DELETE /monitor/runs/{id}` + enforced 90-run retention) · HMAC-signed Slack/Teams webhooks with correlation IDs that actually POST · Jira/Linear push (`POST /export/jira`):
 
 > **2026 correction (Google AI Search Guide May 15 2026):** llms.txt is agent-readable infra for Cursor/Claude Code/MCP, **NOT** a Google citation factor. Chunking is a readability diagnostic, not a ranking predictor. This tool reports bands + confidence intervals, never invented citation probabilities.
-
-![F10 offers](docs/screenshots/19-analysis-f10-offers.png)
 
 ---
 
@@ -357,4 +383,4 @@ Zero lost commissions · higher click-to-register CR · 90%+ QA automation · re
 
 ## 17 · Contributing & license
 
-Issues and PRs welcome. MIT licensed — see `LICENSE` (to be added with your preferred terms).
+Issues and PRs welcome. MIT licensed — see [LICENSE](LICENSE).
