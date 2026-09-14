@@ -1,5 +1,15 @@
 // Shared helpers: API base, theme, storage, downloads, badges, hop maps.
-const API = (location.port === "8099") ? "" : "http://localhost:8099";
+// Same-origin by default (works at / on Render AND at /app/ locally). Only when a
+// developer opens the pages from a different local port/file do we point at the
+// local backend on 8099.
+const API = (() => {
+  try {
+    const h = location.hostname;
+    const local = (h === "localhost" || h === "127.0.0.1" || h === "" || h === "0.0.0.0");
+    if (local && location.port && location.port !== "8099") return "http://localhost:8099";
+  } catch (e) {}
+  return "";
+})();
 const store = {
   get(k, fb) {
     try { const v = sessionStorage.getItem(k); if (v) return JSON.parse(v); } catch (e) {}

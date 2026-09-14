@@ -741,16 +741,15 @@ async def monitor_run_delete(run_id: str, _=Depends(_auth)):
     return {"deleted": True, "run_id": run_id}
 
 
-# ---------------- existing endpoints ----------------
-@app.get("/", include_in_schema=False)
-def root():
-    return RedirectResponse("/app/")
-
-
+# ---------------- web app at domain root ----------------
+# The 3-page frontend lives at "/" (so https://<host>/ IS the tool — no /app suffix).
+# /app/* is kept as a backward-compatible alias. The "/" static mount is registered
+# LAST in this file so every API route above (/audit/*, /mcp, /utils/*, /metrics,
+# /docs, /shots, /content …) matches first and is never swallowed by static files.
 @app.get("/dashboard", include_in_schema=False)
 def dashboard_deprecated():
     """Legacy dashboard/dashboard.html duplicate — canonical is frontend/ 3-page app (P0 dedupe)."""
-    return RedirectResponse("/app/", status_code=301)
+    return RedirectResponse("/", status_code=301)
 
 
 @app.get("/health")
@@ -843,6 +842,15 @@ async def audit_full(body: FullAuditIn, _=Depends(_auth_scope("audit"))):
     chains = await run_bulk_audit(rows, cfg)
     out = _bundle(chains, cfg)
     out["effective_settings"] = {"execution_mode": cfg.get("audit", {}).get("execution_mode"),
-                                 "max_hops": cfg.get("audit", {}).get("max_hops"),
-                                 "concurrency": cfg.get("audit", {}).get("concurrency")}
+                                  "max_hops": cfg.get("audit", {}).get("max_hops"),
+                                  "concurrency": cfg.get("audit", {}).get("concurrency")}
     return out
+
+
+# NOTE: keep this mount LAST — Starlette matches routes in registration order, so the
+# frontend directory served at "/" must come after every API route above. html=True
+# serves index.html at exactly "/", and /analysis.html, /outputs.html, /info.html,
+# /styles.css, /common.js resolve as plain files. All page links and API calls are
+# relative/same-origin, so the tool works identically at / and at the /app/ alias.
+if _FRONTEND.exists():
+    app.mount("/", StaticFiles(directory=str(_FRONTEND), html=True), name="root-app")
