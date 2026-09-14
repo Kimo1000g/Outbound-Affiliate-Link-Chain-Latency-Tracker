@@ -1,27 +1,78 @@
-"""FastAPI — enterprise REST surface + 3-page web app host + live jobs + docs + PDF."""
+"""FastAPI — enterprise REST surface + 3-layer web app host + live jobs + SSE + monitoring + docs + PDF."""
 from __future__ import annotations
 import asyncio
+import json
+import logging
+import os
 import re
 import time as _time
 import uuid
+from contextlib import asynccontextmanager
 from pathlib import Path
 import httpx
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, Query, Request, Depends, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import RedirectResponse, Response
+from fastapi.responses import RedirectResponse, Response, StreamingResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from .orchestrator import load_config, audit_single_url, run_bulk_audit
 from .revenue import network_sla_matrix
-from .alerting_export import build_alerts, jira_tickets
+from .alerting_export import build_alerts, jira_tickets, post_alerts
 from .input_ingest import fetch_sitemap_urls
 from .autofill import profile_site, _check_sitemap
 from .site_content import SECTIONS, NAV
 from .export_pdf import build_pdf
 
-app = FastAPI(title="Outbound Affiliate Link Chain & Latency Tracker", version="2.0.0")
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
-CFG_PATH = "config/enterprise.yaml"
+logger = logging.getLogger("pathfinder")
+logging.basicConfig(level=logging.INFO, format='{"ts":"%(asctime)s","lvl":"%(levelname)s","msg":"%(message)s"}')
+CFG_PATH = os.environ.get("PATHFINDER_CFG", "config/enterprise.yaml")
+
+# ---- optional rate limiting (slowapi) ----
+try:
+    from slowapi import Limiter
+    from slowapi.util import get_remote_address
+    limiter = Limiter(key_func=get_remote_address, default_limits=["120/minute"])
+    _RATE_OK = True
+except Exception:
+    limiter = None
+    _RATE_OK = False
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    try:
+        cfg = load_config(CFG_PATH)
+        from .monitoring import start_scheduler
+        start_scheduler(app, cfg)
+    except Exception as e:
+        logger.warning("scheduler not started: %s", e)
+    yield
+    try:
+        sched = getattr(app.state, "scheduler", None)
+        if sched:
+            sched.shutdown()
+    except Exception:
+        pass
+
+app = FastAPI(title="Outbound Affiliate Link Chain & Latency Tracker", version="3.0.0", lifespan=lifespan)
+if _RATE_OK:
+    app.state.limiter = limiter
+    from slowapi.errors import RateLimitExceeded
+    from slowapi.middleware import SlowAPIMiddleware
+    app.add_middleware(SlowAPIMiddleware)
+    @app.exception_handler(RateLimitExceeded)
+    async def _rl(req, exc):
+        return JSONResponse({"error": "rate-limited — slow down"}, status_code=429)
+
+def _cors_origins() -> list[str]:
+    try:
+        cfg = load_config(CFG_PATH)
+        o = ((cfg.get("security", {}) or {}).get("cors_allow_origins", [])) or []
+        if o:
+            return o
+    except Exception:
+        pass
+    return ["http://localhost:8099", "http://127.0.0.1:8099"]
+app.add_middleware(CORSMiddleware, allow_origins=_cors_origins(), allow_methods=["GET", "POST"], allow_headers=["X-API-Key", "Content-Type", "Authorization"])
 
 _ROOT = Path(__file__).resolve().parent.parent.parent
 _FRONTEND = _ROOT / "frontend"
@@ -29,6 +80,49 @@ if not _FRONTEND.exists():
     _FRONTEND = Path("frontend").resolve()
 if _FRONTEND.exists():
     app.mount("/app", StaticFiles(directory=str(_FRONTEND), html=True), name="app")
+_SHOTS = _ROOT / "output" / "shots"
+try:
+    _SHOTS.mkdir(parents=True, exist_ok=True)
+    app.mount("/shots", StaticFiles(directory=str(_SHOTS)), name="shots")
+except Exception:
+    pass
+
+
+def _api_keys() -> list[str]:
+    try:
+        cfg = load_config(CFG_PATH)
+        keys = ((cfg.get("security", {}) or {}).get("api_keys", []) or [])
+    except Exception:
+        keys = []
+    env = os.environ.get("PATHFINDER_API_KEYS", "")
+    if env:
+        keys = keys + [k.strip() for k in env.split(",") if k.strip()]
+    return keys
+
+
+async def _auth(x_api_key: str | None = Header(default=None), authorization: str | None = Header(default=None)):
+    keys = _api_keys()
+    if not keys:
+        return  # open in dev when no keys configured
+    tok = (x_api_key or "").strip()
+    if not tok and authorization and authorization.lower().startswith("bearer "):
+        tok = authorization[7:].strip()
+    if tok not in keys:
+        raise HTTPException(status_code=401, detail="invalid or missing API key (X-API-Key)")
+
+
+def _redact(obj, params: list[str] | None = None):
+    """Redact credential-ish query params from logged/returned URLs."""
+    try:
+        cfg = load_config(CFG_PATH)
+        plist = ((cfg.get("security", {}) or {}).get("redact_query_params", []) or []) if params is None else params
+    except Exception:
+        plist = ["btag", "affid", "clickid", "subid", "token", "key"]
+    if isinstance(obj, str):
+        for p in plist:
+            obj = re.sub(rf"([?&]{p}=)[^& ]+", r"\1***", obj, flags=re.I)
+        return obj
+    return obj
 
 
 class SingleAuditIn(BaseModel):
@@ -38,9 +132,12 @@ class SingleAuditIn(BaseModel):
     expected_network: str = ""
     geo: str = "US-NJ"
     device: str = "desktop_chrome"
-    clicks_30d: float = 1000
-    epc: float = 1.25
+    clicks_30d: float | None = None
+    epc: float | None = None
+    clicks_basis: str = ""
+    epc_basis: str = ""
     bonus_text_on_site: str = ""
+    model_config = {"extra": "allow"}
 
 
 class FullAuditIn(BaseModel):
@@ -51,6 +148,7 @@ class FullAuditIn(BaseModel):
     global_geo: str = "US-NJ"
     global_device: str = "desktop_chrome"
     settings: dict = {}
+    model_config = {"extra": "allow"}
 
 
 class AutofillIn(BaseModel):
@@ -89,7 +187,8 @@ async def _expand_rows(body: FullAuditIn, cfg: dict, log=None) -> list[dict]:
     for u in _clean_lines(body.pasted_urls):
         if u.startswith("http"):
             rows.append({"source_url": u, "geo": body.global_geo, "device": body.global_device,
-                         "clicks_30d": 1000, "epc": cfg.get("revenue", {}).get("default_epc", 1.25)})
+                         "clicks_30d": None, "epc": None,
+                         "clicks_basis": "UNKNOWN", "epc_basis": "UNKNOWN"})
             n_paste += 1
     if log:
         log(f"added {n_paste} pasted URLs")
@@ -101,7 +200,7 @@ async def _expand_rows(body: FullAuditIn, cfg: dict, log=None) -> list[dict]:
             log(f"sitemap yielded {len(urls)} URLs")
         for u in urls:
             rows.append({"source_url": u, "geo": body.global_geo, "device": body.global_device,
-                         "clicks_30d": 500, "epc": cfg.get("revenue", {}).get("default_epc", 1.25)})
+                         "clicks_30d": None, "epc": None})
     return rows
 
 
@@ -110,13 +209,18 @@ def _bundle(chains, cfg) -> dict:
     alerts = []
     for c in chains:
         alerts.extend(build_alerts(c, int(cfg.get("alerting", {}).get("break_on_high_value_clicks", 5000))))
+    unverified = sum(1 for c in chains if (c.revenue_basis or "").startswith("UNKNOWN"))
     return {"chains": [c.model_dump() for c in chains], "sla": sla, "alerts": alerts,
             "jira": jira_tickets(chains),
             "revenue_at_risk": round(sum(c.revenue_at_risk for c in chains), 2),
+            "revenue_range": [round(sum(c.revenue_at_risk_low for c in chains), 2),
+                              round(sum(c.revenue_at_risk_high for c in chains), 2)],
+            "revenue_honesty": (f"{unverified}/{len(chains)} chains UNKNOWN — supply EPC/clicks or import affiliate/GA4 data" if unverified
+                                else "all chains carry ESTIMATED (±40%) or VERIFIED (±15%) basis — see per-chain revenue_basis"),
             "health_index": round(sum(c.health_score for c in chains) / max(1, len(chains)), 1)}
 
 
-# ---------------- live jobs (log + timer) ----------------
+# ---------------- live jobs (log + SSE stream + sqlite persistence) ----------------
 JOBS: dict = {}
 
 
@@ -125,7 +229,9 @@ async def _run_job(jid: str, payload: dict):
     t0 = job["t0"]
 
     def log(msg: str):
-        job["logs"].append(f"[{_time.perf_counter() - t0:7.1f}s] {msg}")
+        job["logs"].append(f"[{_time.perf_counter() - t0:7.1f}s] {_redact(msg)}")
+        if len(job["logs"]) > 2000:
+            job["logs"] = job["logs"][-2000:]
 
     try:
         body = FullAuditIn(**payload)
@@ -147,20 +253,46 @@ async def _run_job(jid: str, payload: dict):
         def prog(e: dict):
             job["done"] = e.get("index", job["done"])
             if e["event"] == "start":
-                job["logs"].append(f"[{_time.perf_counter() - t0:7.1f}s] ▶ tracing {e['url'][:110]}")
+                job["logs"].append(f"[{_time.perf_counter() - t0:7.1f}s] ▶ tracing {_redact(e['url'][:110])}")
             else:
                 mark = "OK " if e.get("healthy") else "FAIL"
                 job["logs"].append(f"[{_time.perf_counter() - t0:7.1f}s] [{mark} {e['index']}/{job['total']}] "
-                                   f"{e['url'][:90]} · {e.get('ms')} ms · {e.get('reason')}")
+                                   f"{_redact(e['url'][:90])} · {e.get('ms')} ms · {e.get('reason')}")
 
         chains = await run_bulk_audit(rows, cfg, progress=prog)
+        # screenshot evidence (best-effort, never fails the job)
+        if cfg.get("audit", {}).get("screenshot_evidence"):
+            try:
+                from .screenshots import capture_shot
+                for i, c in enumerate(chains):
+                    if c.final_url and c.final_status and c.final_status < 400:
+                        out = str(_SHOTS / jid / f"{i}_{c.device}.png")
+                        shot = await capture_shot(c.final_url, c.device, out)
+                        c.screenshots = {"job_id": jid, "png": f"/shots/{jid}/{i}_{c.device}.png" if shot.get("taken") else "",
+                                         "taken": shot.get("taken"), "reason": shot.get("reason", "")}
+            except Exception as e:
+                log(f"screenshots skipped: {type(e).__name__}")
         out = _bundle(chains, cfg)
         out["effective_settings"] = {"execution_mode": cfg.get("audit", {}).get("execution_mode"),
                                      "max_hops": cfg.get("audit", {}).get("max_hops"),
                                      "concurrency": cfg.get("audit", {}).get("concurrency")}
+        # persist to sqlite (single persistence layer — API never writes output/*.json per job)
+        try:
+            from .persistence import save_run
+            save_run(cfg.get("monitoring", {}).get("db_path", "output/pathfinder.db"), jid, t0,
+                     [c.model_dump() for c in chains], out)
+        except Exception as e:
+            log(f"persistence skipped: {e}")
+        # fire webhooks
+        try:
+            receipt = await post_alerts(out["alerts"], cfg)
+            out["alert_delivery"] = receipt
+            log(f"alert delivery: {receipt}")
+        except Exception:
+            pass
         job["result"] = out
         job["status"] = "done"
-        log(f"complete — revenue at risk ${out['revenue_at_risk']:,.2f} · health {out['health_index']}/100")
+        log(f"complete — revenue at risk ${out['revenue_at_risk']:,.2f} (range ${out['revenue_range'][0]:,.2f}-${out['revenue_range'][1]:,.2f}) · health {out['health_index']}/100")
     except Exception as e:  # noqa: BLE001
         job.update(status="error", error=str(e)[:500])
         log(f"ERROR {e}")
@@ -168,7 +300,7 @@ async def _run_job(jid: str, payload: dict):
 
 
 @app.post("/audit/job")
-async def start_job(body: FullAuditIn):
+async def start_job(body: FullAuditIn, _=Depends(_auth)):
     jid = uuid.uuid4().hex[:12]
     JOBS[jid] = {"status": "running", "total": 0, "done": 0, "logs": [],
                  "t0": _time.perf_counter(), "result": None, "error": ""}
@@ -187,6 +319,28 @@ async def job_status(jid: str):
             "result": job["result"] if job["status"] == "done" else None}
 
 
+@app.get("/audit/job/{jid}/stream")
+async def job_stream(jid: str):
+    """SSE live log — replaces polling GET /audit/job/{id} in a loop."""
+    async def gen():
+        last = 0
+        for _ in range(600):
+            job = JOBS.get(jid)
+            if not job:
+                yield 'data: {"status":"unknown"}\n\n'
+                return
+            logs = job["logs"][last:]
+            last = len(job["logs"])
+            payload = json.dumps({"status": job["status"], "done": job["done"], "total": job["total"],
+                                  "logs": logs[-50],
+                                  "result": job["result"] if job["status"] == "done" else None})
+            yield f"data: {payload}\n\n"
+            if job["status"] in ("done", "error"):
+                return
+            await asyncio.sleep(1.0)
+    return StreamingResponse(gen(), media_type="text/event-stream")
+
+
 # ---------------- docs (auto-updating) ----------------
 @app.get("/content")
 def content():
@@ -194,12 +348,38 @@ def content():
             "nav": NAV, "sections": SECTIONS}
 
 
+@app.get("/llms.txt")
+def llms_txt():
+    return Response("User-agent: *\nAllow: /\n\n# Canonical docs\n- /content — all tool docs (JSON)\n- /docs — OpenAPI\n- /app/ — web UI (3-layer inputs: Essentials, Verification, Advanced)\nContact: publisher affiliate engineering\n",
+                    media_type="text/plain")
+
+
+@app.get("/openapi-example")
+def openapi_example():
+    return {"single": {"source_url": "https://publisher.com/out/bet365?btag=123&a_aid=1&subid=test",
+                       "expected_operator": "bet365", "geo": "US-NJ", "device": "desktop_chrome"},
+            "full": {"pasted_urls": "https://publisher.com/out/bet365?btag=123\n", "global_geo": "US-NJ",
+                     "global_device": "desktop_chrome", "sitemap_limit": 50, "settings": {}}}
+
+
 # ---------------- real PDF ----------------
 @app.post("/export/pdf")
-async def export_pdf(body: dict):
+async def export_pdf(body: dict, _=Depends(_auth)):
     pdf = build_pdf(body.get("result", {}) or {}, body.get("input") or {})
     return Response(content=pdf, media_type="application/pdf",
                     headers={"Content-Disposition": "attachment; filename=affiliate-audit-report.pdf"})
+
+
+@app.post("/export/jira")
+async def export_jira(body: dict, _=Depends(_auth)):
+    """Push the first ticket via Jira API (rest markdown in payload)."""
+    from .ticketing import push_jira
+    tickets = (body.get("result", {}) or {}).get("jira", []) or []
+    if not tickets:
+        return {"pushed": False, "reason": "no tickets — all chains healthy"}
+    t = tickets[0]
+    r = await push_jira(t["summary"], t["description"], t.get("priority", "High"))
+    return {"pushed": r.get("pushed"), "detail": r, "remaining": len(tickets) - 1}
 
 
 class VerifyIn(BaseModel):
@@ -211,7 +391,7 @@ class VerifyIn(BaseModel):
     netmap: list[str] = []
     feeds: list[str] = []
     baselines: list[str] = []
-    default_epc: float = 1.25
+    default_epc: float | None = None
 
 
 def _rx_ok(pattern: str) -> dict:
@@ -276,7 +456,87 @@ async def verify_inputs(body: VerifyIn):
             bbad.append(ln[:80])
     out["baselines"] = {"ok": not bbad, "parsed": prow, "bad": bbad[:10]}
     out["epc_ok"] = (body.default_epc or 0) > 0
+    out["epc_note"] = ("explicit EPC supplied" if out["epc_ok"]
+                       else "no EPC — revenue will be UNKNOWN until affiliate/GA4 import (no $1.25 default)")
     return out
+
+
+# ---------------- F11 + CWV + imports + monitoring ----------------
+@app.post("/audit/ai-visibility")
+async def ai_visibility(body: dict, _=Depends(_auth)):
+    from .geo_ai import audit_ai_visibility
+    url = body.get("url", "")
+    html = ""
+    try:
+        async with httpx.AsyncClient(timeout=15, follow_redirects=True, headers={"User-Agent": "Mozilla/5.0"}) as c:
+            r = await c.get(url)
+            html = r.text[:300000]
+    except Exception as e:
+        return {"url": url, "error": f"{type(e).__name__}: {e}"}
+    return await audit_ai_visibility(url, html)
+
+
+@app.get("/utils/crux")
+async def crux(url: str = Query(...), form: str = "PHONE"):
+    from .crux_psi import fetch_crux
+    return await fetch_crux(url, form)
+
+
+@app.post("/utils/psi")
+async def psi(body: dict, _=Depends(_auth)):
+    from .crux_psi import fetch_psi
+    return await fetch_psi(body.get("url", ""), body.get("strategy", "mobile"))
+
+
+@app.post("/utils/affiliate-import")
+async def affiliate_import(body: dict, _=Depends(_auth)):
+    """Import affiliate stats CSV -> EPC map. Body: {platform, csv_text, date_range}."""
+    from .affiliate_sync import map_affiliate_csv
+    m = map_affiliate_csv(body.get("csv_text", ""), body.get("platform", "everflow"))
+    return {"platform": body.get("platform"), "campaigns": len(m), "map": dict(list(m.items())[:50]),
+            "note": "pass this map as _epc_map per target (or via schedule targets) to flip revenue UNKNOWN->VERIFIED"}
+
+
+@app.post("/utils/traffic-import")
+async def traffic_import(body: dict, _=Depends(_auth)):
+    """Import GA4/GSC CSV (page,clicks) -> traffic map for clicks_30d VERIFIED fill."""
+    from .ga4_gsc import map_traffic_csv
+    m = map_traffic_csv(body.get("csv_text", ""))
+    return {"pages": len(m), "map": dict(list(m.items())[:50]),
+            "note": "pass as _traffic_map per target to flip clicks UNKNOWN->VERIFIED"}
+
+
+@app.get("/utils/ga4-status")
+async def ga4_status_ep():
+    from .ga4_gsc import ga4_status
+    return ga4_status()
+
+
+@app.post("/audit/schedule")
+async def audit_schedule(body: dict, _=Depends(_auth)):
+    """Save/update the recurring monitor target list (APScheduler interval in config)."""
+    cfg = load_config(CFG_PATH)
+    mon = cfg.setdefault("monitoring", {}).setdefault("schedule", {})
+    mon.update({"enabled": True, "interval_minutes": int(body.get("interval_minutes", 60)),
+                "targets": body.get("targets", [])})
+    with open(CFG_PATH, "w", encoding="utf-8") as f:
+        import yaml
+        yaml.safe_dump(cfg, f, sort_keys=False)
+    return {"scheduled": True, "interval_minutes": mon["interval_minutes"], "targets": len(mon["targets"])}
+
+
+@app.get("/monitor/runs")
+async def monitor_runs(limit: int = 20):
+    from .persistence import list_runs
+    cfg = load_config(CFG_PATH)
+    return {"runs": list_runs(cfg.get("monitoring", {}).get("db_path", "output/pathfinder.db"), limit)}
+
+
+@app.get("/monitor/diff")
+async def monitor_diff():
+    from .persistence import diff_last_two
+    cfg = load_config(CFG_PATH)
+    return diff_last_two(cfg.get("monitoring", {}).get("db_path", "output/pathfinder.db"))
 
 
 # ---------------- existing endpoints ----------------
@@ -287,12 +547,27 @@ def root():
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "service": "outbound-affiliate-link-chain-latency-tracker", "version": "2.0.0"}
+    try:
+        from playwright.async_api import async_playwright  # type: ignore
+        pw = True
+    except Exception:
+        pw = False
+    return {"status": "ok", "service": "outbound-affiliate-link-chain-latency-tracker", "version": "3.0.0",
+            "playwright": pw, "rate_limit": _RATE_OK}
 
 
 @app.get("/config/defaults")
-def config_defaults():
-    return load_config(CFG_PATH)
+def config_defaults(_=Depends(_auth)):
+    cfg = load_config(CFG_PATH)
+    # never leak webhooks/keys/proxy creds
+    for section in ("alerting", "security"):
+        for k in ("slack_webhook", "teams_webhook", "api_keys",):
+            if section in cfg and k in cfg[section]:
+                cfg[section][k] = "***" if cfg[section][k] else ""
+    for g, p in (cfg.get("geo_profiles", {}) or {}).items():
+        if p.get("proxy_exit"):
+            p["proxy_exit"] = "***configured***"
+    return cfg
 
 
 @app.get("/utils/sitemap")
@@ -302,26 +577,26 @@ async def expand_sitemap(url: str = Query(...), limit: int = 100):
 
 
 @app.post("/utils/autofill")
-async def autofill_from_site(body: AutofillIn):
+async def autofill_from_site(body: AutofillIn, _=Depends(_auth)):
     return await profile_site(body.site_url, max_pages=max(1, min(body.max_pages, 500)))
 
 
 @app.post("/audit")
-async def audit_one(body: SingleAuditIn):
+async def audit_one(body: SingleAuditIn, _=Depends(_auth)):
     cfg = load_config(CFG_PATH)
     chain = await audit_single_url(body.model_dump(), cfg)
     return chain.model_dump()
 
 
 @app.post("/audit/bulk")
-async def audit_bulk(rows: list[SingleAuditIn]):
+async def audit_bulk(rows: list[SingleAuditIn], _=Depends(_auth)):
     cfg = load_config(CFG_PATH)
     chains = await run_bulk_audit([r.model_dump() for r in rows], cfg)
     return _bundle(chains, cfg)
 
 
 @app.post("/audit/full")
-async def audit_full(body: FullAuditIn):
+async def audit_full(body: FullAuditIn, _=Depends(_auth)):
     cfg = _deep_merge(load_config(CFG_PATH), body.settings or {})
     rows = await _expand_rows(body, cfg)
     if not rows:

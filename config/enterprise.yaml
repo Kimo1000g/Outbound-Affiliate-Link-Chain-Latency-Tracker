@@ -1,12 +1,23 @@
-# Enterprise audit configuration — edit to match your portfolio
+# Enterprise audit configuration — edit to match your portfolio.
+# Honesty model: anything labelled ESTIMATED is a range/assumption, never a measured fact.
 audit:
   max_hops: 12
   timeout_seconds: 20
+  connect_timeout_seconds: 10
   concurrency: 8
-  execution_mode: hybrid        # http_only | hybrid | headless_only
-  user_agent_desktop: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
-  user_agent_mobile_ios: "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1"
-  user_agent_mobile_android: "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Mobile Safari/537.36"
+  max_connections: 50
+  http2: true
+  retries: 2
+  retry_backoff_s: 0.8
+  per_host_rps: 4
+  execution_mode: hybrid        # http_only | hybrid (http + Playwright escalation on bot-wall/JS)
+  user_agent_desktop: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+  user_agent_mobile_ios: "Mozilla/5.0 (iPhone; CPU iPhone OS 18_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.1 Mobile/15E148 Safari/604.1"
+  user_agent_mobile_android: "Mozilla/5.0 (Linux; Android 15; Pixel 9) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
+  deep_cross_device: auto
+  screenshot_evidence: true
+  crux_enabled: false           # set true + CRUX_API_KEY env to enable real CWV
+  psi_enabled: false
 
 tracking_rules:
   required_param_patterns:
@@ -14,36 +25,64 @@ tracking_rules:
     - "(subid|s1|s2|p1|sub_id)"
   promo_patterns:
     - "(promocode|promo|bonus|offer|gclid|dclid)"
-  network_mappings:           # operator -> must-pass-through domains
+  # Safari ITP / Firefox ETP strip these on cross-site bounce — simulate, don't just string-match
+  itp_stripped_params: ["gclid", "fbclid", "msclkid", "dclid", "ttclid", "twclid"]
+  network_mappings:
     bet365: ["incomeaccess", "bet365affiliates"]
     draftkings: ["everflow", "draftkings"]
+    fanduel: ["everflow", "fanduel"]
     betmgm: ["cellxpert", "betmgm"]
     williamhill: ["netrefer", "williamhill"]
+    caesars: ["cellxpert", "caesars"]
 
 geo_profiles:
-  US-NJ: { country: US, region: New_Jersey, currency: USD, age_gate: "21+", license: "NJ DGE" }
-  UK:    { country: GB, region: London,    currency: GBP, age_gate: "18+", license: "UKGC" }
-  CA-ON: { country: CA, region: Ontario,   currency: CAD, age_gate: "19+", license: "AGCO" }
+  US-NJ: { country: US, region: New_Jersey, currency: USD, age_gate: "21+", license: "NJ DGE", proxy_exit: "", min_age: 21 }
+  US-PA: { country: US, region: Pennsylvania, currency: USD, age_gate: "21+", license: "PGCB", proxy_exit: "", min_age: 21 }
+  US-MI: { country: US, region: Michigan, currency: USD, age_gate: "21+", license: "MGCB", proxy_exit: "", min_age: 21 }
+  US-OH: { country: US, region: Ohio, currency: USD, age_gate: "21+", license: "OCCC", proxy_exit: "", min_age: 21 }
+  US-MA: { country: US, region: Massachusetts, currency: USD, age_gate: "21+", license: "MGC", proxy_exit: "", min_age: 21 }
+  UK:    { country: GB, region: London,    currency: GBP, age_gate: "18+", license: "UKGC", proxy_exit: "", min_age: 18 }
+  CA-ON: { country: CA, region: Ontario,   currency: CAD, age_gate: "19+", license: "AGCO", proxy_exit: "", min_age: 19 }
+  DE:    { country: DE, region: Berlin,    currency: EUR, age_gate: "18+", license: "GGL", proxy_exit: "", min_age: 18 }
+  NL:    { country: NL, region: Amsterdam, currency: EUR, age_gate: "18+", license: "KSA", proxy_exit: "", min_age: 18 }
+  # To make geo jurisdiction-pinned (real exit IPs), fill proxy_exit per geo, e.g.:
+  #   proxy_exit: "http://user:pass@geo-proxy:8080"  (Bright Data / Oxylabs / Smartproxy)
 
 compliance_packs:
-  US-NJ: { required_strings: ["21+", "1-800-GAMBLER", "T&Cs Apply", "Gambling Problem"], license_badges: ["NJ DGE", "DGE"], min_age: 21 }
-  UK:    { required_strings: ["18+", "BeGambleAware.org", "T&Cs Apply", "GamStop"], license_badges: ["UKGC", "GamStop"], min_age: 18 }
-  CA-ON: { required_strings: ["19+", "ConnexOntario", "T&Cs Apply"], license_badges: ["AGCO", "iGaming Ontario"], min_age: 19 }
+  US-NJ: { required_strings: ["21+", "1-800-GAMBLER", "T&Cs Apply", "Gambling Problem"], license_badges: ["NJ DGE", "DGE"], min_age: 21, helpline: "1-800-GAMBLER" }
+  US-PA: { required_strings: ["21+", "1-800-GAMBLER", "T&Cs Apply", "Gambling Problem"], license_badges: ["PGCB"], min_age: 21, helpline: "1-800-GAMBLER" }
+  US-MI: { required_strings: ["21+", "1-800-270-7117", "T&Cs Apply", "Gambling Problem"], license_badges: ["MGCB"], min_age: 21, helpline: "1-800-270-7117" }
+  US-OH: { required_strings: ["21+", "1-800-589-9966", "T&Cs Apply"], license_badges: ["OCCC"], min_age: 21, helpline: "1-800-589-9966" }
+  US-MA: { required_strings: ["21+", "1-800-327-5050", "T&Cs Apply"], license_badges: ["MGC"], min_age: 21, helpline: "1-800-327-5050" }
+  UK:    { required_strings: ["18+", "BeGambleAware.org", "T&Cs Apply", "GamStop"], license_badges: ["UKGC", "GamStop"], min_age: 18, helpline: "GamStop" }
+  CA-ON: { required_strings: ["19+", "ConnexOntario", "T&Cs Apply"], license_badges: ["AGCO", "iGaming Ontario"], min_age: 19, helpline: "ConnexOntario" }
+  DE:    { required_strings: ["18+", "Glücksspiel kann süchtig machen", "T&Cs Apply", "GGL"], license_badges: ["GGL"], min_age: 18, helpline: "BZgA" }
+  NL:    { required_strings: ["18+", "Loket Kansspel", "T&Cs Apply", "KSA"], license_badges: ["KSA"], min_age: 18, helpline: "Loket Kansspel" }
 
 latency:
   drop_off_threshold_ms: 1800
   warn_threshold_ms: 900
-  four_g_penalty_factor: 1.35
+  # Honest model — redirect chain budget is NOT LCP/INP/CLS. CrUX/PSI numbers come only from Google APIs.
+  dropoff_formula: "logistic anchored: <=500ms ~0-5%, 500-1800ms 5-35%, >1800ms 35-95% (ESTIMATED, industry bounce curve, not measured conversions)"
+  redirect_budget_note: "Redirect-chain total_ms measures server+network hops only. Page CWV (LCP/INP/CLS) requires CrUX/PSI — see /utils/crux."
 
 revenue:
-  default_epc: 1.25
-  default_clicks_30d: 1000
+  # No generic default: UNKNOWN until the user supplies EPC/clicks or imports affiliate/GA4 data.
+  default_epc: null
+  default_clicks_30d: null
+  revenue_basis_unknown_label: "UNKNOWN — supply EPC + clicks_30d, import affiliate CSV/API, or connect GA4"
+  epc_table_hint:
+    bet365: 1.85
+    draftkings: 2.10
+    fanduel: 2.00
+    betmgm: 1.40
 
 alerting:
   slack_webhook: ""
   teams_webhook: ""
   email_to: []
   break_on_high_value_clicks: 5000
+  post_alerts: true
 
 crawl:
   respect_robots: true
@@ -60,3 +99,17 @@ soft404_phrases:
   - "account migrated"
   - "brand has closed"
   - "404"
+
+easylist:
+  url: "https://easylist.to/easylist/easylist.txt"
+  cache_ttl_hours: 168
+  fallback_hosts: ["doubleclick.net", "googlesyndication.com", "track.", "/track"]
+
+monitoring:
+  db_path: "output/pathfinder.db"
+  retention_runs: 90
+
+security:
+  api_keys: []
+  cors_allow_origins: ["http://localhost:8099"]
+  redact_query_params: ["btag", "affid", "clickid", "subid", "token", "key"]

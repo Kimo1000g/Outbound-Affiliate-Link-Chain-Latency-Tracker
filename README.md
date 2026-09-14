@@ -2,7 +2,9 @@
 
 **Enterprise revenue-guarding engine for iGaming affiliate redirect chains — live multi-hop tracing, param-loss fingerprinting, latency profiling, compliance guardianship and edge auto-healing.**
 
-![Python](https://img.shields.io/badge/Python-3.10%2B-blue) ![FastAPI](https://img.shields.io/badge/FastAPI-REST%20%2B%20Web%20App-green) ![Playwright](https://img.shields.io/badge/Headless-Chromium%20escalation-orange) ![Tests](https://img.shields.io/badge/pytest-9%20passing-brightgreen) ![License](https://img.shields.io/badge/license-MIT-lightgrey)
+![Python](https://img.shields.io/badge/Python-3.10%2B-blue) ![FastAPI](https://img.shields.io/badge/FastAPI-REST%20%2B%20Web%20App-green) ![Playwright](https://img.shields.io/badge/Headless-Chromium%20installed%20(Docker)-orange) ![Tests](https://img.shields.io/badge/pytest-22%20passing-brightgreen) ![License](https://img.shields.io/badge/license-MIT-lightgrey)
+
+> **v3.0 enterprise:** hybrid mode is real (Docker installs Chromium; `playwright_available` reported per chain), `tcp_tls` is labelled `tcp_tls_est_ms` (subtraction, formula published), revenue is UNKNOWN until inputs/imports (ESTIMATED ±40% range / VERIFIED ±15%), redirect-ms is never labelled CWV (CrUX/PSI via `/utils/crux`), inputs are 3 steps (Advanced collapsible), jobs stream over SSE + persist to SQLite with diffs. Quickstart with Docker: `docker compose up --build` → http://localhost:8099/app/ (set `PATHFINDER_API_KEYS` to require API keys).
 
 ![Tool hero — inputs page with site auto-fill](docs/screenshots/01-hero-autofill.png)
 
@@ -18,10 +20,10 @@ This tool continuously **crawls, executes, simulates and audits multi-hop affili
 
 1. [3-page workflow](#1--3-page-workflow)
 2. [Layer 0 — auto-fill any website](#2--layer-0--auto-fill-any-website-url)
-3. [The 10 input layers](#3--the-10-input-layers)
+3. [The 10 input layers in 3 steps](#3--the-10-input-layers-in-3-steps)
 4. [Input verification engine](#4--input-verification-engine)
 5. [Live log + timer](#5--live-log--timer)
-6. [The 10 core engines (F1–F10)](#6--the-10-core-engines-f1f10)
+6. [The 12 engines (F1–F11 + monitoring)](#6--the-12-engines-f1f11--monitoring)
 7. [The 9 outputs (O1–O9)](#7--the-9-outputs-o1o9)
 8. [Documentation pages (auto-updating)](#8--documentation-pages-auto-updating)
 9. [REST API](#9--rest-api)
@@ -40,8 +42,8 @@ This tool continuously **crawls, executes, simulates and audits multi-hop affili
 
 | Page | Purpose |
 |------|---------|
-| **Page 1 — Inputs** (`/app/`) | All 10 input layers + site auto-fill + input verifier + Run with live log |
-| **Page 2 — Analysis** (`/app/analysis.html`) | Full F1–F10 feature analysis for every chain |
+| **Page 1 — Inputs** (`/app/`) | 3 steps (same 10 layers, Advanced collapsible) + site auto-fill + input verifier + Run with live SSE log |
+| **Page 2 — Analysis** (`/app/analysis.html`) | Full F1–F11 feature analysis + severity scoring for every chain |
 | **Page 3 — Outputs** (`/app/outputs.html`) | All 9 executive/engineering/legal outputs + real PDF/CSV/JSON downloads |
 
 Plus 6 auto-updating documentation pages (`/app/info.html?p=about|why2026|features|inputs|outputs|impact`) and light/dark mode on every page:
@@ -70,7 +72,7 @@ What the profiler actually does over live HTTP (no mocks):
 
 ---
 
-## 3 · The 10 input layers
+## 3 · The 10 input layers in 3 steps
 
 ### Layer 1 — Site crawl & target discovery
 
@@ -88,19 +90,19 @@ Primary-ID / sub-ID / promo regexes that must survive every hop, plus operator �
 
 ![Execution environment](docs/screenshots/05-layer3-environment.png)
 
-Licence-jurisdiction geo nodes (US-NJ / UK / CA-ON), device profiles (desktop Chrome/Edge, iOS Safari, Android Chrome), HTTP-only → hybrid → always-headless execution depth, residential proxy routing notes.
+Licence-jurisdiction geo nodes (US-NJ/PA/MI/OH/MA, UK, CA-ON, DE, NL), device profiles (desktop Chrome 131/Edge, iOS 18, Android 15), HTTP-only → hybrid execution with Playwright escalation on bot-walls, per-geo `proxy_exit` for real exit IPs (Bright Data/Oxylabs; empty = direct + explicit unpinned warning).
 
 ### Layer 4 — Regulatory & compliance rules
 
 ![Compliance packs](docs/screenshots/06-layer4-compliance.png)
 
-Per-geo required strings (21+, BeGambleAware.org, 1-800-GAMBLER…), licence badges (UKGC, NJ DGE, AGCO…), soft-404 / expired-offer phrase lists — all scraped live from final landers.
+Per-geo required strings (21+, BeGambleAware.org, 1-800-GAMBLER…), licence badges (UKGC, NJ DGE, AGCO, GGL, KSA, PGCB, MGCB…), age-gate detection, soft-404 / expired-offer phrase lists — all scraped live from final landers.
 
 ### Layer 5 — Business data & revenue context
 
 ![Revenue context](docs/screenshots/07-layer5-revenue.png)
 
-Default EPC + clicks/30d with per-target overrides (GA4/Search Console values go in the targets table). **Rows you hand-edit are badged VERIFIED $; auto-filled rows stay ESTIMATED $** — see [honesty model](#13--verification--honesty-model).
+Blank EPC/clicks = **UNKNOWN $0** (no default $1.25). Per-target overrides or CSV/API imports flip rows to **ESTIMATED ±40%** (table hints) or **VERIFIED ±15%** (GA4 + affiliate exports via `/utils/traffic-import`, `/utils/affiliate-import`) — see [honesty model](#13--verification--honesty-model).
 
 ### Layer 6 — Affiliate program API credentials
 
@@ -108,12 +110,12 @@ Default EPC + clicks/30d with per-target overrides (GA4/Search Console values go
 
 Session-only credential slots for Cellxpert, Income Access, NetRefer, MyAffiliates, Everflow — sent with the run for live campaign sync where supported, never written to disk.
 
-### Layers 7–10 — Ad-block feeds, promo feeds, edge logs, baselines
+### ③ Advanced (collapsible) — Layers 7–10: ad-block feeds, promo feeds, edge logs, baselines
 
 ![Feeds](docs/screenshots/09-layer8-feeds.png)
 ![Baselines](docs/screenshots/10-layer10-baselines.png)
 
-uBlock/EasyList/Brave/Safari-ITP/Firefox-ETP toggles · operator promo feed URLs (RSS auto-discovered) · Cloudflare/Fastly log lines counted for `/out/` `/go/` click events (plus an auto-generated filter recipe) · per-operator click-to-register / click-to-deposit baselines ranked by observed frequency.
+EasyList fetched live weekly (cached, never a stale hardcoded list) + Safari-ITP param-strip simulation · operator promo feed URLs (RSS auto-discovered) · Cloudflare/Fastly log lines counted for `/out/` `/go/` click events (plus an auto-generated filter recipe) · per-operator click-to-register / click-to-deposit baselines ranked by observed frequency.
 
 ---
 
@@ -133,13 +135,13 @@ Every run streams a timestamped engine log with a live timer, progress bar and p
 
 ---
 
-## 6 · The 10 core engines (F1–F10)
+## 6 · The 12 engines (F1–F11 + monitoring)
 
 ### F1 · Multi-hop tracing (HTTP + headless)
 
 ![F1 chain map](docs/screenshots/14-analysis-f1-tracing.png)
 
-301/302/303/307/308/200/404/500 per hop with IPs, servers, DNS/TCP-TLS/TTFB/download splits, JS/meta-refresh detection, bot-wall signals, headless escalation — plus lander forensics, cross-device parity and evidence counters per chain.
+301/302/303/307/308/200/404/500 per hop with IPs, ASN/org (RDAP), servers, DoH-DNS/TTFB/download splits plus honestly-labelled `tcp_tls_est_ms` (subtraction formula published, never socket-faked), JS/meta-refresh detection, 0–100 bot-wall scoring (Cloudflare/Datadome/Akamai/PX), Playwright escalation + screenshot evidence — plus lander forensics with E-E-A-T signals, cross-device parity and evidence counters per chain.
 
 ### F2 · Parameter-loss fingerprinting
 
@@ -151,7 +153,7 @@ Survived / stripped / mutated verdicts per affiliate ID with the exact hop where
 
 ![F3 latency](docs/screenshots/16-analysis-f3-latency.png)
 
-Per-hop timing splits, drop-off risk vs the 1800 ms 4G threshold, jurisdiction-pinned proxy routing notes.
+Per-hop timing splits, ESTIMATED drop-off curve (formula published on every score) vs the 1800 ms threshold, redirect-budget note. Redirect-ms is never labelled CWV — page LCP/INP/CLS come only from CrUX/PSI (`GET /utils/crux`, `POST /utils/psi`).
 
 ### F4 · Compliance & license guardian
 
@@ -167,7 +169,11 @@ Fingerprint-spoofed headers, proxy rotation and headless escalation status per c
 
 ### F7–F10 · Privacy, deep-links, brand AI, offer parity
 
-Ad-block kill simulation per chain · mobile app-scheme/store/universal-link verdicts · expected-vs-rival brand alignment · on-site vs lander bonus comparison:
+Live-EasyList ad-block simulation per chain · mobile app-scheme/store/universal-link verdicts · expected-vs-rival brand alignment · on-site vs lander bonus comparison · thin-affiliate + merchant-copy similarity + site-reputation-abuse pre-flight (SpamBrain 2026):
+
+### F11 · GEO/AEO AI-visibility + scheduled monitoring
+
+`POST /audit/ai-visibility` (llms.txt, robots AI-bot allow, JSON-LD validity, fact density, RAG chunking) · APScheduler + SQLite runs with new-broken/fixed/health-delta diffs (`GET /monitor/runs`, `/monitor/diff`) · Slack/Teams webhooks that actually POST · Jira/Linear push (`POST /export/jira`):
 
 ![F10 offers](docs/screenshots/19-analysis-f10-offers.png)
 
@@ -179,26 +185,26 @@ Ad-block kill simulation per chain · mobile app-scheme/store/universal-link ver
 
 ![Revenue dashboard](docs/screenshots/20-outputs-dashboard.png)
 
-Dollars at risk, 0–100 health index, regs/deposits-lost estimates with an explicit verified-vs-estimated revenue basis.
+Dollars at risk as a **range (low–high)** with formula + per-chain basis (UNKNOWN $0 / ESTIMATED ±40% / VERIFIED ±15%), 0–100 health index plus critical/high/medium/low/info severity scoring.
 
 ### O2 · Engineering action center
 
 ![Action center](docs/screenshots/21-outputs-action-center.png)
 
-Interactive hop maps, failure points, JIRA/Trello/ClickUp-ready tickets, CSV/JSON downloads — and a **real server-generated PDF** (ReportLab bytes, not print-to-PDF).
+Interactive hop maps, failure points, Jira/Linear push + markdown tickets, CSV/JSON downloads — and a **real server-generated PDF** (ReportLab bytes, not print-to-PDF) with revenue ranges and AI-visibility/CWV honesty sections.
 
-### O3 · Latency & Core Web Vitals
+### O3 · Latency (redirect-chain) + honest page CWV
 
 ![Latency report](docs/screenshots/22-outputs-latency-cwv.png)
 
-Slowest-to-fastest network scorecard plus redirect-overhead vs LCP-budget penalty matrix.
+Slowest-to-fastest network scorecard plus redirect-overhead note. Page CWV is **only** shown from Google (CrUX/PSI) — redirect-ms is never mislabelled LCP/INP/CLS.
 
 ### O4–O9 · Compliance, alerts, patches, scorecards, SLA, vendor tickets
 
 ![Compliance](docs/screenshots/23-outputs-compliance.png)
 ![Vendor tickets](docs/screenshots/24-outputs-vendor.png)
 
-Violation + geo-mismatch logs · Slack/Teams payloads + email digest preview · copy-paste edge rules · ad-block vulnerability % · per-network SLA matrix for contract renewals · operator-ready escalation tickets with hop evidence.
+Violation + geo-mismatch logs · Slack/Teams payloads that actually POST (delivery receipts) + monitoring diffs · copy-paste edge rules · ad-block vulnerability % · per-network SLA matrix with revenue ranges · operator-ready escalation tickets with hop evidence + screenshot proof.
 
 ---
 
@@ -219,29 +225,44 @@ Interactive docs at `GET /docs`. Key endpoints:
 
 | Endpoint | Purpose |
 |----------|---------|
-| `POST /audit/job` + `GET /audit/job/{id}` | Async run with live log polling |
+| `POST /audit/job` + `GET /audit/job/{id}` + `GET /audit/job/{id}/stream` | Async run with live log (polling + SSE stream) |
 | `POST /audit/full` | Synchronous full run (targets + all layer settings) |
 | `POST /audit/bulk`, `POST /audit` | Row-list and single-URL audits |
+| `POST /audit/ai-visibility` | F11 GEO/AEO check for one URL |
+| `POST /audit/schedule` + `GET /monitor/runs` + `GET /monitor/diff` | Recurring monitoring + diffs |
 | `POST /utils/autofill` | Deep site profiler (Layer 0) |
 | `POST /utils/verify-inputs` | Live verification of every input field |
 | `GET /utils/sitemap?url=` | Sitemap expansion preview |
-| `POST /export/pdf` | Real PDF report bytes |
-| `GET /content` | Docs content source |
-| `GET /config/defaults` | Enterprise defaults for form prefill |
-| `GET /health` | Health check |
+| `GET /utils/crux?url=` + `POST /utils/psi` | Honest page CWV (CrUX/PSI) |
+| `POST /utils/affiliate-import` + `POST /utils/traffic-import` | VERIFIED revenue inputs |
+| `POST /export/pdf` + `POST /export/jira` | Real PDF bytes + Jira/Linear push |
+| `GET /content` + `GET /llms.txt` + `GET /openapi-example` | Docs, AI-crawler file, API example |
+| `GET /config/defaults` (secrets redacted) | Enterprise defaults for form prefill |
+| `GET /health` | Health check (Playwright + rate-limit status) |
 
 ---
 
 ## 10 · Quickstart
 
+Docker (recommended — Playwright Chromium pre-installed, hybrid mode real):
+
 ```powershell
-pip install -r requirements.txt
-python cli.py audit --csv samples/urls.csv        # CLI audit → output/
-python cli.py serve --port 8099                   # web app + API
-pytest -q                                         # 9 tests
+docker compose up --build
+# open http://localhost:8099/app/  (set PATHFINDER_API_KEYS to require API keys)
 ```
 
-Open **http://localhost:8099** → Page 1 inputs → Run → Page 2 analysis → Page 3 outputs.
+Local:
+
+```powershell
+pip install -r requirements.txt
+python -m playwright install --with-deps chromium   # enables headless escalation + screenshots
+python cli.py audit --csv samples/urls.csv          # CLI audit → output/ (+ SQLite run + webhook POST)
+python cli.py audit --url "https://publisher.com/out/bet365?btag=1" --operator bet365 --clicks 5000 --epc 1.85
+python cli.py serve --port 8099                     # web app + API
+pytest -q                                           # 22 tests
+```
+
+Open **http://localhost:8099** → Page 1 inputs (3 steps) → Run → Page 2 analysis → Page 3 outputs.
 
 ---
 
@@ -252,19 +273,28 @@ cli.py                          CLI (audit / serve)
 config/enterprise.yaml          tracking regex, networks, geo/compliance packs, thresholds
 frontend/                       3-page web app (index/analysis/outputs/info + shared JS/CSS)
 src/redirect_pathfinder/
-  tracer.py                     hybrid HTTP + headless hop engine with per-hop timing
+  tracer.py                     pooled HTTP/2 hop engine (DoH DNS, honest tcp_tls_est, bot-wall score, proxy exits)
+  dns_rdap.py / botwall.py      DoH + RDAP attribution / WAF scoring (CF/Datadome/Akamai/PX)
   rule_engine.py                param survival + network-path audits
-  latency.py / compliance.py    drop-off scoring / RG + soft-404 + geo-mismatch
-  intel.py                      adblock, deep-link, brand, offer engines
+  latency.py / compliance.py    honest drop-off curve / 9-geo packs + age-gate + reputation-abuse
+  intel.py / easylist.py        adblock(ITP)/deep-link/brand/offer + live EasyList + consent/GPC
+  content_quality.py / geo_ai.py SpamBrain EEAT pre-flight / F11 AI-visibility (llms.txt, robots-AI, JSON-LD)
+  crux_psi.py / screenshots.py  honest page CWV (CrUX/PSI) / Playwright screenshot evidence
+  proxy_routing.py              per-geo proxy abstraction (redacted logging)
+  persistence.py / monitoring.py SQLite runs + diffs / APScheduler always-on monitor
+  affiliate_sync.py / ga4_gsc.py affiliate CSV/API + GA4/GSC CSV imports (VERIFIED revenue)
+  ticketing.py                  Jira/Linear/ClickUp real POST
   autofill.py                   deep site profiler (identity, sitemaps, crawl, wayback)
   orchestrator.py               bulk engine + forensics + evidence + cross-device parity
-  revenue.py / edge_healer.py   risk math + SLA + Worker/Vercel/WP patches
-  alerting_export.py            alerts, CSV/JSON/JIRA exports
+  revenue.py / edge_healer.py   UNKNOWN/ESTIMATED/VERIFIED ranges + SLA + Worker/Vercel/WP patches
+  alerting_export.py            alerts (POST), CSV/JSON/JIRA exports
   site_content.py               docs single source of truth
-  export_pdf.py                 real PDF generator (ReportLab)
-  api.py                        FastAPI: jobs, audit, utils, content, PDF, static host
+  export_pdf.py                 real PDF generator (ReportLab, ranges + F11/CWV honesty)
+  api.py                        FastAPI: jobs+SSE, F11, CWV, imports, monitoring, auth/rate-limit, PDF
+Dockerfile / docker-compose.yml Chromium image + api/redis/postgres stack · .github/workflows/ci.yml CI
 samples/urls.csv                demo targets · samples/autofill-demo.html  profiler fixture
-tests/test_pathfinder.py        9 deterministic tests
+tests/test_pathfinder.py        9 deterministic unit tests
+tests/test_enterprise.py        13 enterprise tests (mocked chains, sitemap index, API smoke, honesty)
 docs/screenshots/               27 live screenshots (this README)
 ```
 
@@ -272,21 +302,22 @@ docs/screenshots/               27 live screenshots (this README)
 
 ## 12 · Configuration reference
 
-All defaults live in `config/enterprise.yaml`: `audit` (hops, timeout, concurrency, `hybrid` mode, `deep_cross_device: auto`), `tracking_rules` (ID/sub-ID/promo regex + operator→network map), `geo_profiles`, `compliance_packs` (US-NJ/UK/CA-ON), `latency` (900 warn / 1800 critical), `revenue` (default EPC), `crawl` constraints, `soft404_phrases`. Page 1 overrides any of them per run.
+All defaults live in `config/enterprise.yaml`: `audit` (hops, timeout, pooling 50 conns, HTTP/2, retries, per-host RPS, `hybrid` mode, `deep_cross_device: auto`, screenshots, CrUX/PSI flags), `tracking_rules` (ID/sub-ID/promo regex + ITP strip list + operator→network map), `geo_profiles` (9 geos with `proxy_exit`), `compliance_packs` (US-NJ/PA/MI/OH/MA, UK, CA-ON, DE, NL), `latency` (900 warn / 1800 critical + published formulas), `revenue` (no default EPC — UNKNOWN until inputs/imports), `easylist` (live URL + TTL), `monitoring` (SQLite path + schedule), `security` (API keys, CORS, redaction), `crawl` constraints, `soft404_phrases`. Page 1 overrides any of them per run.
 
 ---
 
 ## 13 · Verification & honesty model
 
-- **Measured live**: statuses, hop counts, IPs, DNS/TCP/TLS/TTFB/download timings, param presence per hop, page text, headers, sitemap XML validity, URL reachability, PDF bytes — each with evidence counters.
-- **Estimated and labelled**: reach-scaled clicks, table EPCs, CTR/CTD-derived regs — badged ESTIMATED until you hand-enter GA4/EPC values (then VERIFIED).
-- **Never claimed**: private revenue without credentials, residential-proxy execution (routing notes + headers are real; exit IPs need your proxy provider), LLM vision (brand checks are deterministic text/DOM analysis).
+- **Measured live**: statuses, hop counts, IPs + ASN/org (DoH + RDAP), DNS/TTFB/download/total timings, param presence per hop, page text, headers, sitemap XML validity, URL reachability, EasyList ruleset version, PDF bytes — each with evidence counters.
+- **Estimated and labelled**: `tcp_tls_est_ms` (subtraction formula published), drop-off % (industry bounce curve published), reach-scaled clicks, table EPCs — badged ESTIMATED with ranges (±40%) until GA4/affiliate imports flip rows to VERIFIED (±15%).
+- **UNKNOWN, never faked**: no clicks/EPC → revenue UNKNOWN $0 (no $1.25 default); no CrUX/PSI key → page CWV unavailable (redirect-ms never mislabelled LCP/INP/CLS); no proxy → direct + explicit unpinned warning.
+- **Never claimed**: private revenue without credentials, exit-IP execution without your proxy provider, LLM vision (brand checks are deterministic text/DOM analysis), invented AI-citation scores (F11 reports measured facts only).
 
 ---
 
 ## 14 · Test report
 
-`pytest -q` → **9 passed**: param extraction, strip/mutation detection, latency verdicts, soft-404 NLP, revenue math + basis labels, strict-sitemap validator, comment-safe field parsing, lander forensics. Live E2E (headless Chromium): analysis renders F1–F10, outputs render O1–O9, zero page errors.
+`pytest -q` → **22 passed** (9 unit + 13 enterprise): param extraction, strip/mutation detection, latency verdicts + honesty fields, soft-404 NLP, revenue UNKNOWN/ESTIMATED/VERIFIED math + ranges, strict-sitemap validator, sitemap-index recursion (mocked), respx-mocked 302→302→200 chain with param-strip audit, bot-wall scoring, live-EasyList parsing, ITP simulation, EEAT/thin-content, affiliate + traffic CSV mappers, API smoke (`/health`, `/content`, `/llms.txt`, imports). CI runs the same suite on every push (`.github/workflows/ci.yml`). Live E2E (headless Chromium): analysis renders F1–F11, outputs render O1–O9, zero page errors.
 
 ---
 
@@ -298,7 +329,7 @@ Zero lost commissions · higher click-to-register CR · 90%+ QA automation · re
 
 ## 16 · Roadmap
 
-Residential-proxy pool connectors · affiliate API live sync (Cellxpert/Income Access/NetRefer/Everflow) · GA4/Search Console ingestion · scheduled monitoring + diff alerts · multi-user workspaces.
+~~Residential-proxy pool connectors~~ ✅ shipped (per-geo `proxy_exit`) · ~~affiliate API live sync~~ ✅ shipped (CSV/API imports) · ~~GA4/Search Console ingestion~~ ✅ shipped (CSV imports + status endpoint) · ~~scheduled monitoring + diff alerts~~ ✅ shipped (APScheduler + SQLite + webhooks) · multi-user workspaces · Postgres/Redis production backend (compose ships it; app auto-uses SQLite until `PATHFINDER_PG_DSN` is set) · CrUX-gated LCP-budget enforcement.
 
 ---
 

@@ -433,10 +433,13 @@ async def profile_site(site_url: str, max_pages: int = 25) -> dict:
         op = _guess_operator(href + " " + " ".join(e["anchors"]))
         clicks = min(20000, 400 + 300 * len(e["linkers"])
                      + (500 if e["bonus"] else 0) + (400 if "review" in e["ptypes"] else 0))
+        _epc = EPC_TABLE.get(op)
         targets.append({"source_url": href, "anchor_text": e["anchors"][0],
                         "expected_operator": op, "expected_network": _guess_network(href),
                         "geo": geo, "device": "desktop_chrome",
-                        "clicks_30d": clicks, "epc": EPC_TABLE.get(op, 1.25),
+                        "clicks_30d": clicks, "epc": _epc,
+                        "clicks_basis": "ESTIMATED reach-scaled (±40%) — connect GA4",
+                        "epc_basis": (f"ESTIMATED table hint ${ _epc} (±40%)" if _epc else "UNKNOWN — import affiliate CSV/API"),
                         "bonus_text_on_site": e["bonus"], "link_status": None,
                         "linked_from_pages": len(e["linkers"]),
                         "_source": "+".join(sorted(e["srcs"])),
@@ -449,7 +452,8 @@ async def profile_site(site_url: str, max_pages: int = 25) -> dict:
         targets.append({"source_url": u, "anchor_text": "(wayback archived page)",
                         "expected_operator": op, "expected_network": _guess_network(u),
                         "geo": geo, "device": "desktop_chrome",
-                        "clicks_30d": 300, "epc": EPC_TABLE.get(op, 1.25),
+                        "clicks_30d": 300, "epc": EPC_TABLE.get(op),
+                        "clicks_basis": "ESTIMATED archive (±40%)", "epc_basis": "UNKNOWN — import affiliate CSV/API",
                         "bonus_text_on_site": "", "link_status": "archive-unverified",
                         "linked_from_pages": 0, "_source": "wayback-archive",
                         "_estimated": "historical URL from Wayback CDX — verify live before trusting"})

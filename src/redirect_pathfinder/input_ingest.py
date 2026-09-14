@@ -1,4 +1,4 @@
-"""Input ingestion — sitemaps, CSV lists, crawl constraints, promo feeds, logs, baselines."""
+"""Input ingestion — strict sitemaps, CSV lists, crawl constraints, promo feeds, logs, baselines."""
 from __future__ import annotations
 import csv
 import re
@@ -7,13 +7,51 @@ from urllib.parse import urlparse
 import httpx
 
 
-async def fetch_sitemap_urls(sitemap_url: str, limit: int = 500) -> list[str]:
+def _strict_urls(text: str) -> tuple[str, list[str]]:
+    """Return (kind, urls) — kind ∈ urlset|index|'' ; strict: XML + <loc> + non-empty."""
+    t = (text or "").strip()
+    if not t.startswith("<") or "<loc>" not in t:
+        return "", []
     try:
-        async with httpx.AsyncClient(timeout=20, follow_redirects=True) as c:
-            r = await c.get(sitemap_url, headers={"User-Agent": "iGaming-Pathfinder/1.0"})
-            root = ET.fromstring(r.text)
-            urls = [e.text.strip() for e in root.iter() if e.tag.endswith("loc") and e.text]
-            return urls[:limit]
+        root = ET.fromstring(t[:2000000])
+    except Exception:
+        return "", []
+    locs = [e.text.strip() for e in root.iter() if e.tag.endswith("loc") and e.text and e.text.strip().startswith("http")]
+    if not locs:
+        return "", []
+    tag = root.tag.lower()
+    if "sitemapindex" in tag:
+        return "index", locs
+    return "urlset", locs
+
+
+async def fetch_sitemap_urls(sitemap_url: str, limit: int = 500) -> list[str]:
+    """Strict: HTTP 200 + XML + <loc>; sitemapindex recurses one level. Never trusts dead sitemaps."""
+    try:
+        async with httpx.AsyncClient(timeout=20, follow_redirects=True,
+                                     headers={"User-Agent": "iGaming-Pathfinder/2.0"}) as c:
+            r = await c.get(sitemap_url)
+            if r.status_code != 200:
+                return []
+            kind, locs = _strict_urls(r.text)
+            if kind == "urlset":
+                return locs[:limit]
+            if kind == "index":
+                out: list[str] = []
+                for child in locs[:10]:
+                    try:
+                        rc = await c.get(child)
+                        if rc.status_code != 200:
+                            continue
+                        k2, l2 = _strict_urls(rc.text)
+                        if k2 == "urlset":
+                            out.extend(l2)
+                        if len(out) >= limit:
+                            break
+                    except Exception:
+                        continue
+                return out[:limit]
+            return []
     except Exception:
         return []
 

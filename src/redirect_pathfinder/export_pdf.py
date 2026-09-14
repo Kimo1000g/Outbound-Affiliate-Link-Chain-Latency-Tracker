@@ -79,9 +79,10 @@ def build_pdf(result: dict, extras: dict | None = None) -> bytes:
     broken = sum(1 for c in chains if not c.get("chain_ok") or not c.get("params_intact"))
     avg_lat = round(sum((c.get("latency") or {}).get("total_ms", 0) for c in chains) / max(1, len(chains)))
     verified_n = sum(1 for c in chains if c.get("revenue_verified"))
-    kpi = [[_p("Revenue at risk (30d)", s_b), _p(f"${(result.get('revenue_at_risk') or 0):,.2f}", s_b)],
-           [_p("Revenue basis", s_b), _p(f"{verified_n}/{len(chains)} chains verified (user GA4/EPC); "
-                                         "rest estimated — see per-chain basis", s_b)],
+    rr = result.get("revenue_range") or [result.get("revenue_at_risk") or 0, result.get("revenue_at_risk") or 0]
+    kpi = [[_p("Revenue at risk (30d)", s_b), _p(f"${(result.get('revenue_at_risk') or 0):,.2f} (range ${rr[0]:,.2f}–${rr[1]:,.2f})", s_b)],
+           [_p("Revenue honesty", s_b), _p(result.get("revenue_honesty") or
+                                          (f"{verified_n}/{len(chains)} VERIFIED; rest ESTIMATED ±40% or UNKNOWN — see per-chain basis"), s_b)],
            [_p("Link Health Index", s_b), _p(f"{result.get('health_index')}/100", s_b)],
            [_p("Chains audited", s_b), _p(str(len(chains)), s_b)],
            [_p("Broken / param-loss", s_b), _p(str(broken), s_b)],
@@ -196,6 +197,16 @@ def build_pdf(result: dict, extras: dict | None = None) -> bytes:
          for c in chains],
         s_c, [56 * mm, 18 * mm, 34 * mm, 30 * mm, 26 * mm, PAGE_W - 164 * mm], header=True))
 
+    story.append(Paragraph("F11 / O3b · AI visibility (GEO) + page CWV honesty", s_h1))
+    for c in chains:
+        ai = c.get("ai_visibility") or {}
+        cx = c.get("crux") or {}
+        story.append(Paragraph(
+            f"{_esc(str(c.get('source_url', ''))[:70])} — llms.txt: "
+            f"{(ai.get('llms_txt') or {}).get('present', '?')} · robots-AI-allow: "
+            f"{(ai.get('robots_ai') or {}).get('allows_ai', '?')} · JSON-LD: "
+            f"{(ai.get('json_ld') or {}).get('valid', '?')} · "
+            f"CrUX: {'available' if cx.get('available') else 'not configured — redirect ms is NOT page CWV'}", s_b))
     story.append(Paragraph("O5 · Alerts", s_h1))
     alerts = result.get("alerts") or [{"channel": "—", "severity": "info",
                                        "text": "No alerts — all quiet"}]

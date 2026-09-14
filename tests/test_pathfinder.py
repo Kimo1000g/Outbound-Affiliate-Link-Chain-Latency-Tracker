@@ -42,7 +42,7 @@ def test_revenue_math():
     c.params_intact = False
     c = score_revenue_and_health(c)
     assert c.revenue_at_risk == 2000.0
-    assert c.revenue_basis.startswith("estimated")
+    assert c.revenue_basis.lower().startswith("estimated")
 
 
 def test_revenue_basis_verified():
@@ -53,7 +53,7 @@ def test_revenue_basis_verified():
     c.compliance = ComplianceResult(compliant=True)
     c.params_intact = True
     c = score_revenue_and_health(c)
-    assert c.revenue_basis.startswith("verified")
+    assert c.revenue_basis.lower().startswith("verified")
 
 
 def test_looks_like_sitemap_strict():

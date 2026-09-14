@@ -1,0 +1,33 @@
+services:
+  api:
+    build: .
+    ports:
+      - "8099:8099"
+    environment:
+      PATHFINDER_CFG: /app/config/enterprise.yaml
+      PATHFINDER_API_KEYS: "dev-key-1"
+      PATHFINDER_DB: /data/pathfinder.db
+      REDIS_URL: redis://redis:6379/0
+    volumes:
+      - pathfinder-data:/data
+      - ./output:/app/output
+    depends_on:
+      - redis
+      - postgres
+    restart: unless-stopped
+  redis:
+    image: redis:7-alpine
+    volumes:
+      - redis-data:/data
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: pathfinder
+      POSTGRES_USER: pathfinder
+      POSTGRES_PASSWORD: pathfinder
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+volumes:
+  pathfinder-data: {}
+  redis-data: {}
+  pg-data: {}

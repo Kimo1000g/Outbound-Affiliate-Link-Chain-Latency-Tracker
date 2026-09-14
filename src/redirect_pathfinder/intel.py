@@ -4,41 +4,76 @@ import random
 import re
 from urllib.parse import urlparse
 
-EASYLIST_HOSTS = ["track.adnetwork.com", "track.", "doubleclick.net", "googlesyndication.com",
-                  "adservice", "ads.", "tracking.", "affiliate.", "cellxpert", "incomeaccess"]
 ADBLOCK_TRACKING_HINTS = ["track.", "/track", "affiliate", "click", "pixel", "beacon", "syndication", "doubleclick"]
 
 
 def spoof_headers(device: str = "desktop_chrome") -> dict:
-    """Realistic fingerprint-spoofed header set to survive Cloudflare/Datadome/Akamai."""
+    """2026-current fingerprint set: Chrome 131, Sec-CH-UA-Platform, br encoding, GPC-aware."""
     from .tracer import DEVICE_UAS
-    sec_ch = '"Chromium";v="126", "Google Chrome";v="126", "Not-A.Brand";v="99"' if "mobile" not in device else '"Chromium";v="126", "Android WebView";v="126"'
+    mobile = "mobile" in device
+    sec_ch = ('"Chromium";v="131", "Google Chrome";v="131", "Not-A.Brand";v="99"'
+              if not mobile else '"Chromium";v="131", "Android WebView";v="131"')
+    platform = '"Android"' if mobile else '"Windows"'
+    lang = random.choice(["en-US,en;q=0.9", "en-GB,en;q=0.9", "en-CA,en;q=0.8", "de-DE,de;q=0.8,en;q=0.7"])
     return {
         "User-Agent": DEVICE_UAS.get(device, DEVICE_UAS["desktop_chrome"]),
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-        "Accept-Language": random.choice(["en-US,en;q=0.9", "en-GB,en;q=0.9", "en-CA,en;q=0.8"]),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/png,*/*;q=0.8",
+        "Accept-Language": lang,
+        "Accept-Encoding": "gzip, deflate, br",
         "Sec-Ch-Ua": sec_ch,
-        "Sec-Ch-Ua-Mobile": "?1" if "mobile" in device else "?0",
+        "Sec-Ch-Ua-Mobile": "?1" if mobile else "?0",
+        "Sec-Ch-Ua-Platform": platform,
         "Sec-Fetch-Dest": "document",
         "Sec-Fetch-Mode": "navigate",
         "Sec-Fetch-Site": "cross-site",
+        "Sec-GPC": "1",  # Global Privacy Control — lets us detect consent-mode behaviour
+        "DNT": "1",
         "Upgrade-Insecure-Requests": "1",
         "Cache-Control": "max-age=0",
     }
 
 
-def audit_adblock(chain) -> object:
-    """Simulate uBlock/EasyList + Brave/Safari-ITP blocking of intermediate tracking hosts."""
-    blocked = []
+def detect_consent_and_gpc(html: str, headers: dict | None = None) -> dict:
+    """Consent-mode / CMP + GPC detection (missing in 2026 builds)."""
+    blob = ((html or "")[:60000]).lower()
+    cmp_hits = [k for k in ("onetrust", "cookiebot", "quantcast", "trustarc", "didomi", "sourcepoint",
+                            "__tcfapi", "consentmanager", "osano", "gtag('consent", "dataLayer".lower())
+                if k in blob]
+    gpc_ack = False
+    try:
+        h = {str(k).lower(): str(v).lower() for k, v in (headers or {}).items()}
+        gpc_ack = "gpc" in " ".join(h.keys()) or "1" in h.get("sec-gpc", "")
+    except Exception:
+        pass
+    gtm = "googletagmanager" in blob or "gtag(" in blob
+    return {"cmp_detected": bool(cmp_hits), "cmp_vendors": cmp_hits[:6],
+            "gpc_signal_sent": True, "gpc_acknowledged": gpc_ack,
+            "gtm_present": gtm,
+            "note": "GPC=1 + DNT=1 sent on every trace; CMP presence gates consent-mode analytics claims"}
+
+
+async def audit_adblock(chain, easylist_hosts: list | None = None, itp_list: list | None = None) -> object:
+    """Live EasyList + structural + Safari-ITP simulation. Never hardcoded-only."""
+    from .easylist import load_easylist, match_blocked, simulate_itp_strip
+    hosts = easylist_hosts if easylist_hosts is not None else await load_easylist()
+    blocked: list[str] = []
     for h in chain.hops:
-        host = (urlparse(h.url).hostname or "").lower()
-        path = h.url.lower()
-        if any(t in host or t in path for t in ADBLOCK_TRACKING_HINTS):
-            # heuristic: dedicated tracking subdomains are the ones adblock kills
-            if host.startswith("track.") or "doubleclick" in host or "syndication" in host or "/track" in path:
-                blocked.append(host or h.url)
+        m = match_blocked(h.url, hosts)
+        if m:
+            blocked.append(f"{(urlparse(h.url).hostname or h.url)} [{m}]")
     chain.adblock_blocked_hosts = sorted(set(blocked))
     chain.adblock_vulnerable = len(chain.adblock_blocked_hosts) > 0
+    chain.adblock_basis = (f"EasyList live ({len(hosts)} rules, weekly cache) + structural tracking-subdomain heuristic"
+                           if hosts else "fallback list (offline) + structural heuristic")
+    # ITP: simulate Safari stripping on final hop params
+    try:
+        final_params = chain.hops[-1].params if chain.hops and chain.hops[-1].params else {}
+        if not final_params:
+            from .rule_engine import extract_params
+            final_params = extract_params(chain.final_url)
+        chain.itp_stripped_simulated = simulate_itp_strip(final_params, itp_list)
+    except Exception:
+        chain.itp_stripped_simulated = []
     return chain
 
 
@@ -66,7 +101,6 @@ def brand_alignment(chain, html: str = "") -> object:
     expected = (chain.expected_operator or "").lower()
     text = ((html or "")[:30000]).lower() + " " + chain.final_url.lower()
     found = bool(expected) and expected.replace(" ", "") in text.replace(" ", "")
-    # detect wrong-brand: any known rival brand on lander while expected missing
     rivals = ["bet365", "draftkings", "fanduel", "betmgm", "caesars", "williamhill", "unibet", "888"]
     rivals_hit = [r for r in rivals if r in text.replace(" ", "") and r != expected.replace(" ", "")]
     chain.brand_alignment = {"expected_brand": chain.expected_operator, "brand_found_on_lander": found,
@@ -85,7 +119,6 @@ def _parse_bonus(s: str) -> tuple:
 
 def offer_discrepancy(chain) -> object:
     """Compare on-site bonus pitch vs lander reality — trust + ASA compliance guard."""
-    # lander bonus extraction happens in orchestrator where HTML exists; here compare if provided
     site = _parse_bonus(chain.bonus_text_on_site or "")
     lander_text = chain.offer_discrepancy.get("lander_bonus_text", "") if isinstance(chain.offer_discrepancy, dict) else ""
     lander = _parse_bonus(lander_text)

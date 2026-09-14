@@ -11,7 +11,7 @@
 <header class="top">
 <div class="brand"><h1>Outbound Affiliate Link Chain <span>&amp; Latency Tracker</span></h1>
 <div class="tagline">Enterprise revenue-guarding engine for iGaming affiliate redirect chains — live multi-hop tracing, param-loss fingerprinting, latency profiling, compliance guardianship and edge auto-healing.</div>
-<div class="crumb">Page 1 · Enterprise Audit Inputs — all 10 input layers</div></div>
+<div class="crumb">Page 1 · Enterprise Audit Inputs — 3 steps: ① Essentials (targets+rules) ② Verification (geo/compliance/revenue) ③ Advanced (collapsible)</div></div>
 <div class="headright"><button class="btn ghost" id="themebtn" onclick="toggleTheme()">☀️ Light mode</button>
 <div class="steps"><div class="step on">1 Inputs</div><div class="step">2 Analysis</div><div class="step">3 Outputs</div></div>
 <nav class="docnav"><a href="info.html?p=about">About</a> · <a href="info.html?p=why2026">Why 2026</a> · <a href="info.html?p=features">Features</a> · <a href="info.html?p=inputs">Inputs</a> · <a href="info.html?p=outputs">Outputs</a> · <a href="info.html?p=impact">Impact</a></nav></div>
@@ -92,8 +92,8 @@ CA-ON=residential-ca-toronto (Toronto exit)</textarea>
 
 <div class="card"><h2><span class="n">5</span>Business Data &amp; Revenue Context</h2>
 <div class="grid3">
-<div><label class="f">Default EPC ($)</label><input type="number" step="0.01" id="d_epc" value="1.25"/></div>
-<div><label class="f">Default clicks / 30d</label><input type="number" id="d_clicks" value="1000"/></div>
+<div><label class="f">Default EPC ($) — blank = UNKNOWN</label><input type="number" step="0.01" id="d_epc" placeholder="UNKNOWN"/></div>
+<div><label class="f">Default clicks / 30d — blank = UNKNOWN</label><input type="number" id="d_clicks" placeholder="UNKNOWN"/></div>
 <div><label class="f">Latency warn (ms)</label><input type="number" id="lat_warn" value="900"/></div>
 <div><label class="f">Latency critical / drop-off (ms)</label><input type="number" id="lat_crit" value="1800"/></div>
 </div><p class="d">Per-target clicks &amp; EPC override these defaults in the targets table (GA4/Search Console values go there).</p></div>
@@ -106,7 +106,9 @@ CA-ON=residential-ca-toronto (Toronto exit)</textarea>
 <div><label class="f">API key</label><input type="password" id="aff_key" placeholder="••••••"/></div>
 </div></div>
 
+<details class="card" id="advanced"><summary style="cursor:pointer;font-weight:800">③ Advanced (collapsible) — layers 7–10: ad-block feeds · promo feeds · edge logs · baselines · F11 AI-visibility &amp; CWV via Outputs page</summary>
 <div class="card"><h2><span class="n">7</span>Ad-Blocker &amp; Privacy Rule Feeds</h2>
+<p class="d" style="font-size:12px">Engine fetches EasyList live weekly (cached) + simulates Safari ITP param-stripping. Checkboxes scope reporting only.</p>
 <div class="chk"><input type="checkbox" id="ab_ublock" checked/> uBlock Origin</div>
 <div class="chk"><input type="checkbox" id="ab_easylist" checked/> EasyList</div>
 <div class="chk"><input type="checkbox" id="ab_brave" checked/> Brave Shields</div>
@@ -129,6 +131,7 @@ CA-ON=residential-ca-toronto (Toronto exit)</textarea>
 draftkings,9.2,2.4
 betmgm,7.8,1.9
 williamhill,6.5,1.6</textarea></div>
+</details>
 
 <div class="card" style="text-align:center">
 <div class="rowbtns" style="justify-content:center"><button class="btn ghost" id="verifybtn" onclick="verifyInputs()">✔ VERIFY EVERY INPUT FIELD LIVE</button></div>
@@ -145,7 +148,7 @@ williamhill,6.5,1.6</textarea></div>
 </main>
 <script src="common.js?v=3"></script>
 <script>
-const GEOS=["US-NJ","UK","CA-ON"], DEVS=["desktop_chrome","desktop_edge","mobile_ios","mobile_android"];
+const GEOS=["US-NJ","US-PA","US-MI","US-OH","US-MA","UK","CA-ON","DE","NL"], DEVS=["desktop_chrome","desktop_edge","mobile_ios","mobile_android"];
 function addRow(d={}){
   const tb=document.querySelector("#targets tbody"), tr=document.createElement("tr");
   tr.innerHTML=`<td><input type="text" data-k="source_url" style="min-width:220px" value="${d.source_url||""}"/></td>
@@ -154,8 +157,8 @@ function addRow(d={}){
   <td><input type="text" data-k="expected_network" value="${d.expected_network||""}"/></td>
   <td><select data-k="geo">${GEOS.map(g=>`<option ${g===(d.geo||"US-NJ")?"selected":""}>${g}</option>`).join("")}</select></td>
   <td><select data-k="device">${DEVS.map(x=>`<option ${x===(d.device||"desktop_chrome")?"selected":""}>${x}</option>`).join("")}</select></td>
-  <td><input type="number" data-k="clicks_30d" value="${d.clicks_30d??1000}"/></td>
-  <td><input type="number" step="0.01" data-k="epc" value="${d.epc??1.25}"/></td>
+  <td><input type="number" data-k="clicks_30d" placeholder="UNKNOWN" value="${d.clicks_30d??""}"/></td>
+  <td><input type="number" step="0.01" data-k="epc" placeholder="UNKNOWN" value="${d.epc??""}"/></td>
   <td><input type="text" data-k="bonus_text_on_site" value="${d.bonus_text_on_site||""}"/></td>
   <td><button class="btn ghost" onclick="this.closest('tr').remove()">✕</button></td>`;
   tb.appendChild(tr);
@@ -165,7 +168,7 @@ document.querySelector("#csv").addEventListener("change",ev=>{
   const r=new FileReader();
   r.onload=()=>{ const [head,...lines]=r.result.split(/\r?\n/); const H=head.split(",").map(s=>s.trim());
     lines.filter(Boolean).forEach(ln=>{ const cells=ln.split(/,(?=(?:[^"]*"[^"]*")*[^"]*$)/).map(s=>s.trim().replace(/^"|"$/g,""));
-      const o={}; H.forEach((h,i)=>o[h]=cells[i]||""); o.clicks_30d=+o.clicks_30d||1000; o.epc=+o.epc||1.25; addRow(o); }); };
+      const o={}; H.forEach((h,i)=>o[h]=cells[i]||""); o.clicks_30d=o.clicks_30d||""; o.epc=o.epc||""; addRow(o); }); };
   r.readAsText(f);
 });
 document.querySelector("#targets tbody").addEventListener("input",e=>{ const tr=e.target.closest("tr"); if(tr) tr.dataset.v="1"; });
@@ -209,13 +212,42 @@ async function verifyInputs(){
       `<br/><b>Layer 1 URLs:</b> ${ok(v.urls.filter(u=>u.live).length,v.urls.length)} reachable`+(deadU.length?`<br/><span style="color:var(--red)">Dead URLs: ${deadU.map(u=>`${u.url} (${u.note})`).join(", ")}</span>`:"")+
       `<br/><b>Layer 2 regex:</b> ids ${v.regex.ids.ok?"✅":"❌ "+v.regex.ids.error} · sub ${v.regex.sub.ok?"✅":"❌ "+v.regex.sub.error} · promo ${v.regex.promo.ok?"✅":"❌ "+v.regex.promo.error}`+
       `<br/><b>Layer 2 netmap:</b> ${v.netmap.ok?`✅ ${v.netmap.parsed} mappings`:`❌ bad lines: ${v.netmap.bad.join("; ")}`}`+
-      `<br/><b>Layer 5 EPC default:</b> ${v.epc_ok?"✅ $"+body.default_epc:"❌ must be > 0"}`+
+      `<br/><b>Revenue EPC default:</b> ${v.epc_ok?"✅ $"+body.default_epc:"⚠ blank = UNKNOWN (no default $ — import affiliate/GA4 data)"}`+
       `<br/><b>Layer 8 feeds:</b> ${ok(v.feeds.filter(f=>f.live).length,v.feeds.length)} live`+
       `<br/><b>Layer 10 baselines:</b> ${v.baselines.ok?`✅ ${v.baselines.parsed} rows`:`❌ ${v.baselines.bad.join("; ")}`}`;
   }catch(e){ box.textContent="Verify failed: "+e; }
   btn.disabled=false;
 }
 let _timer=null;
+async function pollJobSSE(id,msg,btn){
+  // SSE live stream (new) — falls back to polling when unavailable
+  const log=document.querySelector("#livelog"), bar=document.querySelector("#jobbar");
+  document.querySelector("#livecard").style.display="";
+  log.innerHTML=""; bar.style.width="0%";
+  window._jobT0=Date.now(); window._jobDone=false;
+  clearInterval(_timer);
+  _timer=setInterval(()=>{ const el=document.querySelector("#livetimer"); if(el && !window._jobDone) el.textContent=fmtTime((Date.now()-window._jobT0)/1000); },250);
+  return new Promise(resolve=>{
+    let done=false;
+    try{
+      const es=new EventSource(API+"/audit/job/"+id+"/stream");
+      es.onmessage=ev=>{
+        try{
+          const j=JSON.parse(ev.data);
+          (j.logs||[]).forEach(l=>{ log.innerHTML+=String(l).replace(/</g,"&lt;")+"\n"; });
+          log.scrollTop=log.scrollHeight;
+          const pct=j.total?Math.round(j.done/j.total*100):0;
+          bar.style.width=pct+"%";
+          document.querySelector("#jobpct").textContent=`${j.done||0}/${j.total||"?"} chains · ${pct}%`;
+          if(j.status==="done"){ done=true; es.close(); window._jobDone=true; clearInterval(_timer); msg.innerHTML=`✅ Done — opening analysis…`; resolve(j.result); }
+          if(j.status==="error"||j.status==="unknown"){ done=true; es.close(); window._jobDone=true; clearInterval(_timer); msg.textContent="Job failed: "+(j.error||j.status); btn.disabled=false; resolve(null); }
+        }catch(e){}
+      };
+      es.onerror=()=>{ if(!done){ es.close(); pollJob(id,msg,btn).then(resolve); } };
+      setTimeout(()=>{ if(!done){ try{es.close();}catch(e){} pollJob(id,msg,btn).then(resolve); } }, 1000*60*20);
+    }catch(e){ pollJob(id,msg,btn).then(resolve); }
+  });
+}
 async function pollJob(id,msg,btn){
   const log=document.querySelector("#livelog"), bar=document.querySelector("#jobbar");
   document.querySelector("#livecard").style.display="";
@@ -254,7 +286,7 @@ async function runAnalysis(){
                         "UK":{required_strings:csv2list("#c_uk"),license_badges:csv2list("#b_uk")},
                         "CA-ON":{required_strings:csv2list("#c_on"),license_badges:csv2list("#b_on")}},
       latency:{warn_threshold_ms:+document.querySelector("#lat_warn").value||900, drop_off_threshold_ms:+document.querySelector("#lat_crit").value||1800},
-      revenue:{default_epc:+document.querySelector("#d_epc").value||1.25},
+      revenue:{default_epc:document.querySelector("#d_epc").value?+document.querySelector("#d_epc").value:null},
       soft404_phrases:csv2list("#soft404")
     }
   };
@@ -266,7 +298,7 @@ async function runAnalysis(){
   try{
     const jr=await fetch(API+"/audit/job",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
     const {job_id}=await jr.json();
-    const out=await pollJob(job_id,msg,btn);
+    const out=await pollJobSSE(job_id,msg,btn);
     if(!out) return;
     if(out.error){ msg.textContent=out.error; btn.disabled=false; return; }
     store.set("pf_result",out); store.set("pf_input",extras);
