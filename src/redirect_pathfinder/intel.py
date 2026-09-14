@@ -1,6 +1,6 @@
 """Bot-mitigation & anti-evasion helpers + adblock / deeplink / brand / offer auditors."""
 from __future__ import annotations
-import random
+import hashlib
 import re
 from urllib.parse import urlparse
 
@@ -14,7 +14,10 @@ def spoof_headers(device: str = "desktop_chrome") -> dict:
     sec_ch = ('"Chromium";v="132", "Google Chrome";v="132", "Not-A.Brand";v="99"'
               if not mobile else '"Chromium";v="132", "Android WebView";v="132"')
     platform = '"Android"' if mobile else '"Windows"'
-    lang = random.choice(["en-US,en;q=0.9", "en-GB,en;q=0.9", "en-CA,en;q=0.8", "de-DE,de;q=0.8,en;q=0.7"])
+    # Deterministic rotation keyed by device hash (reproducible runs — no unseeded random)
+    _langs = ["en-US,en;q=0.9", "en-GB,en;q=0.9", "en-CA,en;q=0.8", "de-DE,de;q=0.8,en;q=0.7"]
+    _idx = int(hashlib.md5(device.encode("utf-8")).hexdigest(), 16) % len(_langs)
+    lang = _langs[_idx]
     return {
         "User-Agent": ROTATING_UAS.get(device, ROTATING_UAS["desktop_chrome"]),
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/png,*/*;q=0.8",
@@ -34,7 +37,7 @@ def spoof_headers(device: str = "desktop_chrome") -> dict:
 
 
 def tcf_and_consent_v2(html: str) -> dict:
-    """Consent Mode v2 + TCF 2.2 string parse (post-3P-cookie attribution requirement)."""
+    """Consent Mode v2 + TCF 2.3 string parse (TCF 2.3 mandatory Mar 1 2026; 2.2 strings dropped)."""
     blob = (html or "")[:120000]
     low = blob.lower()
     # TCF consent string (base64url-ish long token in cookie/localStorage/JS)
@@ -44,11 +47,40 @@ def tcf_and_consent_v2(html: str) -> dict:
     ad_storage = bool(_re.search(r"ad_storage['\"]?\s*:\s*['\"]?(granted|denied)", low))
     analytics_storage = bool(_re.search(r"analytics_storage['\"]?\s*:\s*['\"]?(granted|denied)", low))
     s2s = bool(_re.search(r"server-side|server side|s2s|gtm.*server|stape|addingwell", low))
+    # TCF version digit: look for explicit 2.2/2.3 markers near consent tokens
+    ver = ""
+    m = _re.search(r"tcf[\s_-]*v?(2\.[23])|tcf[\s_-]*2\.[23]|version[\s'\"]*[:=][\s'\"]*(2\.[23])", low)
+    if m:
+        ver = next((g for g in m.groups() if g), "")
+    if not ver:
+        # vendordisclosed / publisherCC + 2.3-only GVL signals imply 2.3; bare euconsent-v2 implies 2.2-era
+        has_vendor_disclosed = bool(_re.search(r"vendordisclosed|vendor.?disclosed|publishercc|purposeone|gdprApplies", low))
+        if _re.search(r"\b2\.3\b", blob):
+            ver = "2.3"
+        elif _re.search(r"\b2\.2\b", blob):
+            ver = "2.2"
+        elif has_vendor_disclosed:
+            ver = "2.3"
+        elif tcf_hit:
+            ver = "2.2"
+    vendor_disclosed = bool(_re.search(r"vendordisclosed|vendor.?disclosed", low))
+    if ver == "2.3":
+        tcf_version = "2.3"
+    elif ver == "2.2":
+        tcf_version = "2.2-deprecated"
+    else:
+        tcf_version = "unknown"
+    note = ("Consent Mode v2 ad_storage/analytics_storage + TCF 2.3 required for CAPI/S2S postback "
+            "attribution as 3P cookies die; affiliate _epc_map CSV will break without S2S validation. "
+            "TCF 2.3 mandatory Mar 1 2026 — 2.2 strings are dropped by vendors.")
+    if tcf_version == "2.2-deprecated":
+        note += " This page signals TCF 2.2 — upgrade CMP to 2.3 before Mar 1 2026 cutoff."
     return {"tcf2_present": tcf_hit, "consent_mode_v2": gtag_consent,
             "ad_storage_signal": ad_storage, "analytics_storage_signal": analytics_storage,
             "s2s_gtm_hint": s2s,
-            "note": ("Consent Mode v2 ad_storage/analytics_storage + TCF 2.2 required for CAPI/S2S postback "
-                     "attribution as 3P cookies die; affiliate _epc_map CSV will break without S2S validation"),
+            "tcf_version": tcf_version, "tcf_version_detected": ver or "unknown",
+            "vendor_disclosed_present": vendor_disclosed,
+            "note": note,
             "basis": "measured static HTML/JS markers — confirm in DevTools Application tab"}
 
 

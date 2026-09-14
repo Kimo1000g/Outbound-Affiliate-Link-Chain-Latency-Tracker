@@ -16,13 +16,23 @@ TLD_GEO = {".co.uk": "UK", ".uk": "UK", ".us": "US", ".nj": "US-NJ", ".ca": "CA"
 AGE_GATE_RX = re.compile(r"(are you (over )?1[89]|verify (your )?age|date of birth|enter your birth|i am (over )?1[89]|age (verification|gate|check))", re.I)
 
 
+def _phrase_hit(low: str, phrase: str) -> bool:
+    """Word-boundary match for bare numeric codes (fixes '404' matching '14040' etc)."""
+    p = (phrase or "").strip().lower()
+    if not p:
+        return False
+    if p == "404" or re.fullmatch(r"\d+", p):
+        return bool(re.search(r"\b" + re.escape(p) + r"\b", low))
+    return p in low
+
+
 def detect_soft404(html: str, status: int | None, phrases: list[str]) -> tuple[bool, list[str]]:
     low = (html or "").lower()
-    hits = [p for p in phrases if p.lower() in low]
+    hits = [p for p in (phrases or []) if _phrase_hit(low, p)]
     m_title = re.search(r"<title[^>]*>(.*?)</title>", low, re.DOTALL)
     title = m_title.group(1) if m_title else ""
-    if "not found" in title or "404" in title:
-        if "404" not in hits:
+    if "not found" in title or re.search(r"\b404\b", title):
+        if not any(h.lower() == "404" or h.startswith("title:") for h in hits):
             hits.append("title:404/not-found")
     return (len(hits) > 0 and (status == 200 or status is None)), hits
 

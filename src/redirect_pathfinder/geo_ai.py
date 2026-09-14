@@ -122,13 +122,17 @@ def _facts(html: str) -> dict:
         raw = min(100, density * 25)
         band = "strong" if raw >= 75 else ("moderate" if raw >= 45 else "weak")
         facts["extractable_in_html"] = len(text) > 500
-        facts["score_est"] = raw  # kept for back-compat dashboards; prefer band below
+        # DEPRECATED: readability_hint kept ONLY for back-compat dashboards — it is an
+        # HTML readability heuristic, NOT a citation probability. Use facts["band"].
+        facts["readability_hint"] = raw
         facts["band"] = band
         facts["basis"] = ("ESTIMATED readability band (strong≥75/moderate 45-74/weak<45) — "
-                          "fact density in crawlable HTML aids extraction; it does NOT predict citations (Google May 2026)")
+                          "fact density in crawlable HTML aids extraction; it does NOT predict citations (Google May 2026). "
+                          "readability_hint is deprecated; never treat it as citation probability — use sov.run_sov().")
         return facts
     except Exception:
-        return {"score_est": 0, "band": "weak", "basis": "parse error"}
+        return {"readability_hint": 0, "band": "weak",
+                "basis": "parse error — readability_hint deprecated, not a citation probability"}
 
 
 def _chunks(html: str) -> dict:

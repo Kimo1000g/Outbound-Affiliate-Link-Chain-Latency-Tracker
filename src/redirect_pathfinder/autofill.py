@@ -48,16 +48,37 @@ KNOWN_NETWORKS = {
 PLATFORM_BY_DOMAIN = {"incomeaccess": "Income Access", "everflow": "Everflow",
                       "cellxpert": "Cellxpert", "netrefer": "NetRefer",
                       "myaffiliates": "MyAffiliates"}
-EPC_TABLE = {"bet365": 1.85, "draftkings": 2.10, "fanduel": 2.00, "betmgm": 1.40,
+# EXAMPLE-ONLY order-of-magnitude hints — NEVER reported as measured; chains stay UNKNOWN without import
+EPC_TABLE_EXAMPLE = {"bet365": 1.85, "draftkings": 2.10, "fanduel": 2.00, "betmgm": 1.40,
              "caesars": 1.60, "williamhill": 0.95, "unibet": 1.10,
              "espnbet": 1.70, "fanatics": 1.65, "betrivers": 1.30}
+EPC_TABLE = EPC_TABLE_EXAMPLE  # compat alias — always EXAMPLE-ONLY, never measured
 BASE_CTR_CTD = {"bet365": (8.5, 2.1), "draftkings": (9.2, 2.4), "fanduel": (9.0, 2.3),
                 "betmgm": (7.8, 1.9), "caesars": (7.2, 1.8), "williamhill": (6.5, 1.6),
                 "unibet": (6.8, 1.7)}
 BONUS_RX = re.compile(r"(deposit|bet|wager)[^.]{0,40}?get[^.]{0,40}", re.IGNORECASE)
 REVIEW_RX = re.compile(r"review|bonus|promo|offer|comparison|vs\.?-|top-?10|best-", re.I)
-UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-      "(KHTML, like Gecko) Chrome/126.0 Safari/537.36")
+try:
+    from .tls_client import ROTATING_UAS as _ROTATING_UAS
+    UA = _ROTATING_UAS["desktop_chrome"]
+except Exception:  # pragma: no cover — fallback if tls_client unavailable
+    UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+          "(KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36")
+
+
+def _spoof_like_headers() -> dict:
+    """Full spoof-like header set for profiler fetches (mirrors intel.spoof_headers core)."""
+    try:
+        from .intel import spoof_headers as _sh
+        return _sh("desktop_chrome")
+    except Exception:
+        return {
+            "User-Agent": UA,
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Accept-Encoding": "gzip, deflate, br",
+            "Upgrade-Insecure-Requests": "1",
+        }
 
 
 def _norm(site: str) -> str:
@@ -228,8 +249,14 @@ async def profile_site(site_url: str, max_pages: int = 25) -> dict:
     host = urlparse(site_url).hostname or ""
     warnings: list[str] = []
     sem = asyncio.Semaphore(8)
+    PROFILE_WALL_BUDGET_S = 240.0  # total timeout guard for profile_site crawl
+    _t_start = time.perf_counter()
+
+    def _budget_left() -> float:
+        return PROFILE_WALL_BUDGET_S - (time.perf_counter() - _t_start)
+
     async with httpx.AsyncClient(timeout=15, follow_redirects=True,
-                                 headers={"User-Agent": UA}) as client:
+                                 headers=_spoof_like_headers()) as client:
         # ---- identity: resolve + fetch homepage with headers ----
         try:
             loop = asyncio.get_running_loop()
@@ -310,6 +337,16 @@ async def profile_site(site_url: str, max_pages: int = 25) -> dict:
             queue.insert(0, site_url)
         pages: list[dict] = []
 
+        # robots Crawl-delay (seconds) if present, else 0.25s politeness
+        _crawl_delay = 0.25
+        try:
+            import re as _re_cd
+            _m = _re_cd.search(r"(?im)^\s*Crawl-delay\s*:\s*([\d.]+)", robots or "")
+            if _m:
+                _crawl_delay = min(10.0, max(0.25, float(_m.group(1))))
+        except Exception:
+            pass
+
         async def _get(url: str):
             async with sem:
                 try:
@@ -317,6 +354,7 @@ async def profile_site(site_url: str, max_pages: int = 25) -> dict:
                     _path = urlparse(url).path or "/"
                     if any(_path.startswith(d) for d in robots_disallow if d):
                         return None
+                    await asyncio.sleep(_crawl_delay)  # crawl-delay politeness
                     r = await client.get(url)
                     ct = r.headers.get("content-type", "")
                     if len(r.content or b"") > MAX_FETCH_BYTES:
@@ -330,6 +368,9 @@ async def profile_site(site_url: str, max_pages: int = 25) -> dict:
         # crawl in waves so priority order is respected
         idx = 0
         while len(pages) < max_pages and idx < len(queue):
+            if _budget_left() <= 0:
+                warnings.append("profile crawl aborted: 240s wall-clock budget exceeded — partial results")
+                break
             batch = [u for u in queue[idx:idx + 8] if u not in seen]
             idx += 8
             if not batch:
@@ -452,13 +493,13 @@ async def profile_site(site_url: str, max_pages: int = 25) -> dict:
         op = _guess_operator(href + " " + " ".join(e["anchors"]))
         clicks = min(20000, 400 + 300 * len(e["linkers"])
                      + (500 if e["bonus"] else 0) + (400 if "review" in e["ptypes"] else 0))
-        _epc = EPC_TABLE.get(op)
+        _epc = EPC_TABLE_EXAMPLE.get(op)
         targets.append({"source_url": href, "anchor_text": e["anchors"][0],
                         "expected_operator": op, "expected_network": _guess_network(href),
                         "geo": geo, "device": "desktop_chrome",
                         "clicks_30d": clicks, "epc": _epc,
                         "clicks_basis": "ESTIMATED reach-scaled (±40%) — connect GA4",
-                        "epc_basis": (f"ESTIMATED table hint ${ _epc} (±40%)" if _epc else "UNKNOWN — import affiliate CSV/API"),
+                        "epc_basis": (f"EXAMPLE-ONLY table hint ${ _epc} (±40%) — NEVER reported as measured; UNKNOWN without import" if _epc else "UNKNOWN — import affiliate CSV/API"),
                         "bonus_text_on_site": e["bonus"], "link_status": None,
                         "linked_from_pages": len(e["linkers"]),
                         "_source": "+".join(sorted(e["srcs"])),
@@ -471,14 +512,14 @@ async def profile_site(site_url: str, max_pages: int = 25) -> dict:
         targets.append({"source_url": u, "anchor_text": "(wayback archived page)",
                         "expected_operator": op, "expected_network": _guess_network(u),
                         "geo": geo, "device": "desktop_chrome",
-                        "clicks_30d": 300, "epc": EPC_TABLE.get(op),
+                        "clicks_30d": 300, "epc": EPC_TABLE_EXAMPLE.get(op),
                         "clicks_basis": "ESTIMATED archive (±40%)", "epc_basis": "UNKNOWN — import affiliate CSV/API",
                         "bonus_text_on_site": "", "link_status": "archive-unverified",
                         "linked_from_pages": 0, "_source": "wayback-archive",
                         "_estimated": "historical URL from Wayback CDX — verify live before trusting"})
     # ---- live verification of top targets ----
     async with httpx.AsyncClient(timeout=12, follow_redirects=False,
-                                 headers={"User-Agent": UA}) as vc:
+                                 headers=_spoof_like_headers()) as vc:
         async def _check(t: dict):
             try:
                 r = await vc.head(t["source_url"])

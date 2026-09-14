@@ -24,6 +24,7 @@ from .site_content import SECTIONS, NAV
 from .export_pdf import build_pdf
 from .ssrf import assert_safe_url, MAX_FETCH_BYTES
 from .job_store import job_create, job_get, job_log, job_update, schedule_save, schedule_load
+from .multitenant import check_scope, configured_keys
 from .observability import metrics_payload, init_tracing
 from .mcp import MCP_MANIFEST, dispatch as mcp_dispatch
 
@@ -78,7 +79,7 @@ def _cors_origins() -> list[str]:
     except Exception:
         pass
     return ["http://localhost:8099", "http://127.0.0.1:8099"]
-app.add_middleware(CORSMiddleware, allow_origins=_cors_origins(), allow_methods=["GET", "POST"], allow_headers=["X-API-Key", "Content-Type", "Authorization"])
+app.add_middleware(CORSMiddleware, allow_origins=_cors_origins(), allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH", "HEAD"], allow_headers=["*"])
 
 _ROOT = Path(__file__).resolve().parent.parent.parent
 _FRONTEND = _ROOT / "frontend"
@@ -106,15 +107,73 @@ def _api_keys() -> list[str]:
     return keys
 
 
-async def _auth(x_api_key: str | None = Header(default=None), authorization: str | None = Header(default=None)):
-    keys = _api_keys()
-    if not keys:
-        return  # open in dev when no keys configured
+async def _auth(request: Request, x_api_key: str | None = Header(default=None), authorization: str | None = Header(default=None)):
+    """Default auth (audit scope) — back-compat wrapper around _auth_scope."""
+    return await _auth_scope("audit")(
+        request, x_api_key=x_api_key, authorization=authorization)
+
+
+# ---- per-key rate limit (in-memory token bucket, 60/min) + request size cap ----
+_KEY_BUCKETS: dict[str, list[float]] = {}
+_KEY_RATE_LIMIT = 60
+_KEY_WINDOW_S = 60.0
+_MAX_BODY_BYTES = 2 * 1024 * 1024
+
+
+def _extract_token(x_api_key: str | None, authorization: str | None) -> str:
     tok = (x_api_key or "").strip()
     if not tok and authorization and authorization.lower().startswith("bearer "):
         tok = authorization[7:].strip()
-    if tok not in keys:
+    return tok
+
+
+def _enforce_per_key_rate(tok: str):
+    key = tok or "anon"
+    now = _time.monotonic()
+    hits = _KEY_BUCKETS.get(key, [])
+    hits = [t for t in hits if now - t < _KEY_WINDOW_S]
+    if len(hits) >= _KEY_RATE_LIMIT:
+        raise HTTPException(status_code=429, detail="per-key rate limit exceeded (60/min)")
+    hits.append(now)
+    _KEY_BUCKETS[key] = hits
+
+
+def _enforce_size(request: Request | None):
+    try:
+        cl = request.headers.get("content-length") if request is not None else None
+        if cl and int(cl) > _MAX_BODY_BYTES:
+            raise HTTPException(status_code=413, detail="payload too large (2MB cap)")
+    except HTTPException:
+        raise
+    except Exception:
+        pass
+
+
+def _auth_scope(need: str):
+    """Dependency factory: enforce per-key rate limit + size cap + scope check.
+
+    Returns the workspace string. Open-dev-mode (no keys configured) allows all.
+    """
+    async def _dep(request: Request,
+                   x_api_key: str | None = Header(default=None),
+                   authorization: str | None = Header(default=None)):
+        tok = _extract_token(x_api_key, authorization)
+        _enforce_per_key_rate(tok)
+        _enforce_size(request)
+        ok, ws = check_scope(tok or "", need)
+        if ok:
+            return ws or "default"
+        if not tok:
+            raise HTTPException(status_code=401, detail="invalid or missing API key (X-API-Key)")
+        # distinguish unknown key (401) from known key lacking scope (403)
+        try:
+            known = any(e.get("key") == tok for e in configured_keys())
+        except Exception:
+            known = False
+        if known:
+            raise HTTPException(status_code=403, detail=f"key lacks '{need}' scope")
         raise HTTPException(status_code=401, detail="invalid or missing API key (X-API-Key)")
+    return _dep
 
 
 def _redact(obj, params: list[str] | None = None):
@@ -192,6 +251,14 @@ async def _expand_rows(body: FullAuditIn, cfg: dict, log=None) -> list[dict]:
     n_paste = 0
     for u in _clean_lines(body.pasted_urls):
         if u.startswith("http"):
+            try:
+                assert_safe_url(u)
+            except ValueError as e:
+                if log:
+                    log(f"blocked pasted URL (SSRF guard): {u[:110]} — {e}")
+                else:
+                    logger.warning("blocked pasted URL (SSRF guard): %s — %s", u[:110], e)
+                continue
             rows.append({"source_url": u, "geo": body.global_geo, "device": body.global_device,
                          "clicks_30d": None, "epc": None,
                          "clicks_basis": "UNKNOWN", "epc_basis": "UNKNOWN"})
@@ -199,6 +266,14 @@ async def _expand_rows(body: FullAuditIn, cfg: dict, log=None) -> list[dict]:
     if log:
         log(f"added {n_paste} pasted URLs")
     for sm in _clean_lines(body.sitemap_urls):
+        try:
+            assert_safe_url(sm)
+        except ValueError as e:
+            if log:
+                log(f"blocked sitemap URL (SSRF guard): {sm[:110]} — {e}")
+            else:
+                logger.warning("blocked sitemap URL (SSRF guard): %s — %s", sm[:110], e)
+            continue
         if log:
             log(f"expanding sitemap {sm} …")
         urls = await fetch_sitemap_urls(sm, limit=body.sitemap_limit)
@@ -295,9 +370,14 @@ async def _run_job(jid: str, payload: dict):
                                      "concurrency": cfg.get("audit", {}).get("concurrency")}
         # persist to sqlite (single persistence layer — API never writes output/*.json per job)
         try:
-            from .persistence import save_run
-            save_run(cfg.get("monitoring", {}).get("db_path", "output/pathfinder.db"), jid, t0,
+            from .persistence import save_run, enforce_retention
+            db_path = cfg.get("monitoring", {}).get("db_path", "output/pathfinder.db")
+            save_run(db_path, jid, t0,
                      [c.model_dump() for c in chains], out)
+            try:
+                enforce_retention(db_path)
+            except Exception:
+                pass
         except Exception as e:
             log(f"persistence skipped: {e}")
         # fire webhooks
@@ -320,7 +400,7 @@ async def _run_job(jid: str, payload: dict):
 
 
 @app.post("/audit/job")
-async def start_job(body: FullAuditIn, _=Depends(_auth)):
+async def start_job(body: FullAuditIn, _=Depends(_auth_scope("audit"))):
     jid = uuid.uuid4().hex[:12]
     job = job_create(jid)
     job["t0"] = _time.perf_counter()
@@ -350,7 +430,9 @@ async def job_stream(jid: str, request: Request, _=Depends(_auth)):
     async def gen():
         last = last_id
         eid = last_id
-        for _ in range(600):
+        for i in range(3600):
+            if i > 0 and i % 15 == 0:
+                yield ": keepalive\n\n"
             job = _job(jid)
             if not job:
                 eid += 1
@@ -393,14 +475,14 @@ def openapi_example():
 
 # ---------------- real PDF ----------------
 @app.post("/export/pdf")
-async def export_pdf(body: dict, _=Depends(_auth)):
+async def export_pdf(body: dict, _=Depends(_auth_scope("export"))):
     pdf = build_pdf(body.get("result", {}) or {}, body.get("input") or {})
     return Response(content=pdf, media_type="application/pdf",
                     headers={"Content-Disposition": "attachment; filename=affiliate-audit-report.pdf"})
 
 
 @app.post("/export/jira")
-async def export_jira(body: dict, _=Depends(_auth)):
+async def export_jira(body: dict, _=Depends(_auth_scope("export"))):
     """Push the first ticket via Jira API (rest markdown in payload)."""
     from .ticketing import push_jira
     tickets = (body.get("result", {}) or {}).get("jira", []) or []
@@ -574,7 +656,7 @@ async def mcp_manifest():
 
 
 @app.post("/mcp")
-async def mcp_endpoint(body: dict, _=Depends(_auth)):
+async def mcp_endpoint(body: dict, _=Depends(_auth_scope("mcp"))):
     """MCP JSON-RPC 2.0: {jsonrpc, id, method: tools/list|tools/call, params}."""
     method = body.get("method", "")
     if method == "tools/list":
@@ -625,13 +707,13 @@ async def ga4_status_ep():
 
 
 @app.post("/audit/schedule")
-async def audit_schedule(body: dict, _=Depends(_auth)):
+async def audit_schedule(body: dict, _=Depends(_auth_scope("admin"))):
     """Save/update the recurring monitor target list (DB-backed — P0 fix, was YAML rewrite race)."""
     return schedule_save(int(body.get("interval_minutes", 60)), body.get("targets", []))
 
 
 @app.get("/audit/schedule")
-async def audit_schedule_get(_=Depends(_auth)):
+async def audit_schedule_get(_=Depends(_auth_scope("admin"))):
     return schedule_load()
 
 
@@ -647,6 +729,16 @@ async def monitor_diff():
     from .persistence import diff_last_two
     cfg = load_config(CFG_PATH)
     return diff_last_two(cfg.get("monitoring", {}).get("db_path", "output/pathfinder.db"))
+
+
+@app.delete("/monitor/runs/{run_id}")
+async def monitor_run_delete(run_id: str, _=Depends(_auth)):
+    from .persistence import delete_run
+    cfg = load_config(CFG_PATH)
+    ok = delete_run(cfg.get("monitoring", {}).get("db_path", "output/pathfinder.db"), run_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="run not found")
+    return {"deleted": True, "run_id": run_id}
 
 
 # ---------------- existing endpoints ----------------
@@ -713,21 +805,35 @@ async def autofill_from_site(body: AutofillIn, _=Depends(_auth)):
 
 
 @app.post("/audit")
-async def audit_one(body: SingleAuditIn, _=Depends(_auth)):
+async def audit_one(body: SingleAuditIn, _=Depends(_auth_scope("audit"))):
+    try:
+        assert_safe_url(body.source_url)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=f"SSRF guard: {e}")
     cfg = load_config(CFG_PATH)
     chain = await audit_single_url(body.model_dump(), cfg)
     return chain.model_dump()
 
 
 @app.post("/audit/bulk")
-async def audit_bulk(rows: list[SingleAuditIn], _=Depends(_auth)):
+async def audit_bulk(rows: list[SingleAuditIn], _=Depends(_auth_scope("audit"))):
+    for r in rows:
+        try:
+            assert_safe_url(r.source_url)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=f"SSRF guard: {e}")
     cfg = load_config(CFG_PATH)
     chains = await run_bulk_audit([r.model_dump() for r in rows], cfg)
     return _bundle(chains, cfg)
 
 
 @app.post("/audit/full")
-async def audit_full(body: FullAuditIn, _=Depends(_auth)):
+async def audit_full(body: FullAuditIn, _=Depends(_auth_scope("audit"))):
+    for r in body.targets:
+        try:
+            assert_safe_url(r.source_url)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=f"SSRF guard: {e}")
     cfg = _deep_merge(load_config(CFG_PATH), body.settings or {})
     rows = await _expand_rows(body, cfg)
     if not rows:

@@ -6,6 +6,7 @@ opentelemetry, sentry_sdk are all optional; endpoints degrade to {enabled:false}
 from __future__ import annotations
 import os
 import time
+from contextlib import contextmanager
 
 _START = time.perf_counter()
 COUNTERS: dict[str, float] = {"audits_total": 0, "hops_total": 0, "errors_total": 0}
@@ -85,3 +86,31 @@ def init_tracing():
                 pass
     except Exception:
         pass
+
+
+@contextmanager
+def span(name: str, attributes: dict | None = None):
+    """OTel span context manager — no-op (yields None) when OTel is missing.
+
+    Usage: `with span("audit_single_url", {"source_url": url}): ...`
+    Never raises, even if the exporter is misconfigured mid-request.
+    """
+    try:
+        from opentelemetry import trace as _trace  # type: ignore
+        tracer = _trace.get_tracer("redirect_pathfinder")
+        try:
+            with tracer.start_as_current_span(str(name)) as s:  # type: ignore[attr-defined]
+                try:
+                    if attributes and s is not None and hasattr(s, "set_attribute"):
+                        for k, v in attributes.items():
+                            try:
+                                s.set_attribute(str(k), str(v)[:500])
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
+                yield s
+        except Exception:
+            yield None
+    except Exception:
+        yield None

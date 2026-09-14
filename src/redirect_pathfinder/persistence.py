@@ -21,7 +21,40 @@ def _connect(db_path: str) -> sqlite3.Connection:
       revenue_at_risk REAL, health REAL, payload TEXT)""")
     c.execute("""CREATE TABLE IF NOT EXISTS findings(
       run_id TEXT, source_url TEXT, verdict TEXT, reason TEXT, revenue_at_risk REAL)""")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_findings_run ON findings(run_id)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_runs_started ON runs(started)")
     return c
+
+
+def enforce_retention(db_path: str, keep_runs: int = 90) -> dict:
+    """Delete oldest runs beyond keep_runs + their findings."""
+    try:
+        c = _connect(db_path)
+        try:
+            ids = [r[0] for r in c.execute(
+                "SELECT id FROM runs ORDER BY started DESC LIMIT -1 OFFSET ?",
+                (keep_runs,)).fetchall()]
+            for rid in ids:
+                c.execute("DELETE FROM findings WHERE run_id=?", (rid,))
+                c.execute("DELETE FROM runs WHERE id=?", (rid,))
+            c.commit()
+            return {"pruned": len(ids), "keep_runs": keep_runs}
+        finally:
+            c.close()
+    except Exception:
+        return {"pruned": 0, "keep_runs": keep_runs}
+
+
+def delete_run(db_path: str, run_id: str) -> bool:
+    """Delete a run + its findings. Returns True if a run row was removed."""
+    c = _connect(db_path)
+    try:
+        c.execute("DELETE FROM findings WHERE run_id=?", (run_id,))
+        cur = c.execute("DELETE FROM runs WHERE id=?", (run_id,))
+        c.commit()
+        return (cur.rowcount or 0) > 0
+    finally:
+        c.close()
 
 
 def save_run(db_path: str, run_id: str, started: float, chains: list[dict], bundle: dict) -> dict:
@@ -32,12 +65,18 @@ def save_run(db_path: str, run_id: str, started: float, chains: list[dict], bund
                   (run_id, started, time.time(), len(chains), broken,
                    bundle.get("revenue_at_risk", 0), bundle.get("health_index", 0),
                    json.dumps({"sla": bundle.get("sla"), "alerts": bundle.get("alerts")})[:200000]))
+        # idempotent retry: clear prior findings for this run before inserting
+        c.execute("DELETE FROM findings WHERE run_id=?", (run_id,))
         for ch in chains:
             c.execute("INSERT INTO findings VALUES(?,?,?,?,?)",
                       (run_id, ch.get("source_url", ""),
                        "ok" if (ch.get("chain_ok") and ch.get("params_intact")) else "broken",
                        ch.get("broken_reason", "")[:300], ch.get("revenue_at_risk", 0)))
         c.commit()
+        try:
+            enforce_retention(db_path)
+        except Exception:
+            pass
         return {"run_id": run_id, "targets": len(chains), "broken": broken}
     finally:
         c.close()

@@ -1,8 +1,68 @@
-"""Alerting (Slack/Teams/webhook POST — actually firing) + CSV/JSON/JIRA exporters."""
+"""Alerting (Slack/Teams/webhook POST — actually firing) + CSV/JSON/JIRA exporters.
+
+Webhook security: payloads are HMAC-SHA256 signed via PATHFINDER_WEBHOOK_SECRET
+(header X-PF-Signature: sha256=<hex>). Each request carries a correlation ID
+(uuid hex, header X-PF-Correlation-ID) propagated into logs/receipts. Without a
+secret, payloads go unsigned with an explicit note — never silently unsigned.
+"""
 from __future__ import annotations
 import csv
+import hashlib
+import hmac
 import json
 import os
+import uuid
+
+UNSIGNED_NOTE = "unsigned (set PATHFINDER_WEBHOOK_SECRET)"
+
+
+def webhook_secret() -> str:
+    """Shared webhook signing secret ('' when not configured)."""
+    return os.environ.get("PATHFINDER_WEBHOOK_SECRET", "") or ""
+
+
+def new_correlation_id() -> str:
+    """Per-request correlation ID (uuid hex) for log/receipt tracing."""
+    try:
+        return uuid.uuid4().hex
+    except Exception:
+        import random
+        return "%032x" % random.getrandbits(128)
+
+
+def sign_payload(body: bytes, secret: str = "") -> str:
+    """HMAC-SHA256 hex digest of raw request body ('' when no secret)."""
+    sec = secret if secret else webhook_secret()
+    if not sec:
+        return ""
+    try:
+        return hmac.new(sec.encode("utf-8"), body, hashlib.sha256).hexdigest()
+    except Exception:
+        return ""
+
+
+def build_signed_request(payload: dict, secret: str = "",
+                         correlation_id: str = "") -> dict:
+    """Serialize + sign a webhook payload -> {body, headers, correlation_id, signed, note}.
+
+    Headers always include Content-Type + X-PF-Correlation-ID; X-PF-Signature
+    (sha256=<hex>) only when a secret is configured.
+    """
+    cid = correlation_id or new_correlation_id()
+    try:
+        body = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    except Exception:
+        body = json.dumps(payload, default=str).encode("utf-8")
+    sig = sign_payload(body, secret)
+    headers = {"Content-Type": "application/json", "X-PF-Correlation-ID": cid}
+    if sig:
+        headers["X-PF-Signature"] = f"sha256={sig}"
+        note = "signed sha256"
+    else:
+        note = UNSIGNED_NOTE
+    return {"body": body, "headers": headers, "correlation_id": cid,
+            "signed": bool(sig), "signature": f"sha256={sig}" if sig else "",
+            "note": note}
 
 
 def build_alerts(chain, high_value_clicks: int = 5000) -> list[dict]:
@@ -40,21 +100,29 @@ async def post_alerts(alerts: list[dict], cfg: dict) -> dict:
         return {"posted": False, "reason": "alerting.post_alerts=false"}
     if not alerts:
         return {"posted": False, "reason": "no alerts"}
-    receipt = {"slack": None, "teams": None}
+    cid = new_correlation_id()
+    secret = webhook_secret()
+    receipt: dict = {"slack": None, "teams": None, "correlation_id": cid,
+                     "signed": bool(secret),
+                     "signature_note": "signed sha256 (X-PF-Signature)" if secret else UNSIGNED_NOTE}
     try:
         async with httpx.AsyncClient(timeout=12) as c:
             if slack:
                 texts = [x["text"] for x in alerts if "slack" in x.get("channel", "")]
                 if texts:
-                    r = await c.post(slack, json={"text": "🛰 Affiliate chain alerts\n" + "\n".join(f"• [{x['severity']}] {x['text'][:400]}" for x in alerts if 'slack' in x.get('channel',''))[:20]})
-                    receipt["slack"] = f"HTTP {r.status_code}"
+                    payload = {"text": "🛰 Affiliate chain alerts\n" + "\n".join(f"• [{x['severity']}] {x['text'][:400]}" for x in alerts if 'slack' in x.get('channel',''))[:20]}
+                    signed = build_signed_request(payload, secret=secret, correlation_id=cid)
+                    r = await c.post(slack, content=signed["body"], headers=signed["headers"])
+                    receipt["slack"] = f"HTTP {r.status_code} cid={cid} {signed['note']}"
             if teams:
                 texts = [x["text"] for x in alerts if "teams" in x.get("channel", "")]
                 if texts:
-                    r = await c.post(teams, json={"text": "Affiliate chain alerts\n" + "\n".join(texts[:20])})
-                    receipt["teams"] = f"HTTP {r.status_code}"
+                    payload = {"text": "Affiliate chain alerts\n" + "\n".join(texts[:20])}
+                    signed = build_signed_request(payload, secret=secret, correlation_id=cid)
+                    r = await c.post(teams, content=signed["body"], headers=signed["headers"])
+                    receipt["teams"] = f"HTTP {r.status_code} cid={cid} {signed['note']}"
     except Exception as e:
-        receipt["error"] = f"{type(e).__name__}: {e}"
+        receipt["error"] = f"{type(e).__name__}: {e} cid={cid}"
     receipt["posted"] = bool(receipt.get("slack") or receipt.get("teams"))
     if not receipt["posted"] and "error" not in receipt:
         receipt["reason"] = "no webhooks configured — alerts built but not delivered (set alerting.slack_webhook)"
@@ -84,14 +152,21 @@ def export_json(chains: list, path: str) -> str:
 
 def jira_tickets(chains: list) -> list[dict]:
     out = []
+    secret = webhook_secret()
     for c in chains:
         if c.chain_ok and c.params_intact and c.compliance.compliant:
             continue
+        cid = new_correlation_id()
+        body = (f"Source: {c.source_url}\nFinal: {c.final_url} [{c.final_status}]\n"
+                f"Hops: {len(c.hops)} total {c.latency.total_ms:.0f}ms (redirect-chain, not CWV)\n"
+                f"Params: {[(e.param, e.status) for e in c.param_events]}\n"
+                f"Revenue at risk: ${c.revenue_at_risk} (range ${getattr(c,'revenue_at_risk_low',0)}-${getattr(c,'revenue_at_risk_high',0)}) basis: {getattr(c,'revenue_basis','')}\nVendor ticket:\n{c.vendor_ticket}")
+        sig = sign_payload(body.encode("utf-8"), secret)
         out.append({"project": "AFF", "issuetype": "Bug",
                     "summary": f"[Affiliate] Broken chain: {c.source_url} ({c.broken_reason or 'param-loss'})",
-                    "description": f"Source: {c.source_url}\nFinal: {c.final_url} [{c.final_status}]\n"
-                                   f"Hops: {len(c.hops)} total {c.latency.total_ms:.0f}ms (redirect-chain, not CWV)\n"
-                                   f"Params: {[(e.param, e.status) for e in c.param_events]}\n"
-                                   f"Revenue at risk: ${c.revenue_at_risk} (range ${getattr(c,'revenue_at_risk_low',0)}-${getattr(c,'revenue_at_risk_high',0)}) basis: {getattr(c,'revenue_basis','')}\nVendor ticket:\n{c.vendor_ticket}",
-                    "priority": "Highest" if c.revenue_at_risk > 1000 else "High"})
+                    "description": body,
+                    "priority": "Highest" if c.revenue_at_risk > 1000 else "High",
+                    "correlation_id": cid,
+                    "webhook_signature": f"sha256={sig}" if sig else "",
+                    "signature_note": "signed sha256 (X-PF-Signature)" if sig else UNSIGNED_NOTE})
     return out

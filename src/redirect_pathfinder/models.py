@@ -62,7 +62,8 @@ class ParamEvent(BaseModel):
     last_seen_hop: Optional[int] = None
     stripped_at_hop: Optional[int] = None
     mutated_to: Optional[str] = None
-    status: str  # survived | stripped | mutated
+    status: str  # survived | stripped | mutated | injected-mid-chain
+    note: Optional[str] = None  # informational only, e.g. cookies out-of-band / fragment handling
 
 
 class ComplianceResult(BaseModel):
@@ -114,7 +115,7 @@ class ChainResult(BaseModel):
     chain_ok: bool = True
     broken_reason: str = ""
     param_events: list[ParamEvent] = Field(default_factory=list)
-    params_intact: bool = True
+    params_intact: Optional[bool] = True  # True intact | False stripped/mutated | None unknown (clean link, zero tracked params at hop 0)
     itp_stripped_simulated: list = Field(default_factory=list)
     compliance: ComplianceResult = Field(default_factory=ComplianceResult)
     latency: LatencyScore = Field(default_factory=LatencyScore)

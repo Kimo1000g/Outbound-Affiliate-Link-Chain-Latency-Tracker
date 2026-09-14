@@ -5,6 +5,14 @@ import random
 import yaml
 from .models import ChainResult
 from .tracer import trace_chain, try_headless_follow
+try:
+    from .observability import span as _span
+except Exception:  # pragma: no cover — observability is optional
+    from contextlib import contextmanager as _cm
+
+    @_cm
+    def _span(name: str, attributes: dict | None = None):  # type: ignore[misc]
+        yield None
 from .rule_engine import audit_param_survival, audit_network_path
 from .latency import score_latency
 from .compliance import audit_compliance
@@ -113,22 +121,23 @@ async def audit_single_url(row: dict, cfg: dict, _shared_client=None, _easylist_
     except Exception:
         pass
     mounts = proxy_mounts(proxy)
-    try:
-        out = await trace_chain(src, device=device, max_hops=max_hops,
-                                timeout_s=timeout_s, extra_headers=headers,
-                                connect_s=connect_s, max_conn=max_conn, http2=http2,
-                                retries=retries, per_host_rps=per_host_rps,
-                                proxy_mounts=mounts, client=_shared_client)
-        if len(out) == 5:
-            hops, html, js_hit, botwall, timing_meta = out
-        else:  # pragma: no cover — defensive
-            hops, html, js_hit, botwall = out[0], out[1], out[2], out[3]
-            timing_meta = {}
-        needs_headless = bool((botwall or {}).get("needs_headless"))
-    except Exception as e:  # noqa: BLE001 — never let one URL kill a bulk run
-        from .models import Hop
-        hops, html, js_hit, botwall, timing_meta = ([Hop(index=0, url=src, redirect_type="error", error=str(e)[:250])], "", False, {"botwall_score": 0, "needs_headless": False}, {})
-        needs_headless = False
+    with _span("trace_chain", {"source_url": src[:200], "mode": mode}):
+        try:
+            out = await trace_chain(src, device=device, max_hops=max_hops,
+                                    timeout_s=timeout_s, extra_headers=headers,
+                                    connect_s=connect_s, max_conn=max_conn, http2=http2,
+                                    retries=retries, per_host_rps=per_host_rps,
+                                    proxy_mounts=mounts, client=_shared_client)
+            if len(out) == 5:
+                hops, html, js_hit, botwall, timing_meta = out
+            else:  # pragma: no cover — defensive
+                hops, html, js_hit, botwall = out[0], out[1], out[2], out[3]
+                timing_meta = {}
+            needs_headless = bool((botwall or {}).get("needs_headless"))
+        except Exception as e:  # noqa: BLE001 — never let one URL kill a bulk run
+            from .models import Hop
+            hops, html, js_hit, botwall, timing_meta = ([Hop(index=0, url=src, redirect_type="error", error=str(e)[:250])], "", False, {"botwall_score": 0, "needs_headless": False}, {})
+            needs_headless = False
     chain.hops = hops
     chain.js_redirect_detected = js_hit
     chain.botwall = botwall or {"botwall_score": 0, "needs_headless": False}
@@ -138,20 +147,62 @@ async def audit_single_url(row: dict, cfg: dict, _shared_client=None, _easylist_
         chain.playwright_available = True
     except Exception:
         chain.playwright_available = False
-    # headless escalation (hybrid only; http_only never launches a browser)
-    if mode == "hybrid" and chain.needs_headless:
-        try:
-            furl, hhtml, avail = await try_headless_follow(hops[-1].url if hops else src, device=device)
-            chain.playwright_available = avail and chain.playwright_available is not False or avail
-            if hhtml:
-                chain.headless_used = True
-                html = hhtml
-                if furl and furl != (hops[-1].url if hops else src):
-                    from .models import Hop as H
-                    hops.append(H(index=len(hops), url=furl, status=200, redirect_type="headless-final"))
-                    chain.hops = hops
-        except Exception:
-            pass
+    # Explicit render fork — recorded in chain.evidence["render_fork"].
+    # - hybrid: escalate to Playwright when needs_headless OR botwall/
+    #   consent-wall score >= 50 OR final HTML empty with a >=400 status.
+    # - http_only: NEVER escalate — pure curl-cffi/httpx path.
+    # - mixed: escalate via Playwright page.request style (API-level, no full render).
+    try:
+        _bw_score = int((botwall or {}).get("botwall_score", 0) or 0)
+    except Exception:
+        _bw_score = 0
+    try:
+        _last_status = hops[-1].status if hops else None
+    except Exception:
+        _last_status = None
+    _html_empty_400 = (not (html or "").strip()) and isinstance(_last_status, int) and _last_status >= 400
+    _fork_triggers = []
+    if needs_headless:
+        _fork_triggers.append("needs_headless")
+    if _bw_score >= 50:
+        _fork_triggers.append(f"botwall_score={_bw_score}>=50")
+    if _html_empty_400:
+        _fork_triggers.append(f"empty-html+status={_last_status}")
+    if mode == "http_only":
+        render_fork = {"decision": "skip",
+                       "reason": "http_only mode — pure curl-cffi/httpx path; never escalate"}
+    elif mode == "mixed":
+        if _fork_triggers:
+            render_fork = {"decision": "escalate_page_request",
+                           "reason": "mixed mode — Playwright page.request style (API-level, no full render); triggers: " + ",".join(_fork_triggers)}
+        else:
+            render_fork = {"decision": "no_escalation", "reason": "mixed mode — no fork triggers"}
+    else:  # hybrid (default) — explicit escalation rule
+        if _fork_triggers:
+            render_fork = {"decision": "escalate",
+                           "reason": "hybrid fork triggers: " + ",".join(_fork_triggers)}
+        else:
+            render_fork = {"decision": "no_escalation", "reason": "hybrid — no fork triggers"}
+    # headless escalation (hybrid/mixed only; http_only never launches a browser)
+    if render_fork["decision"] in ("escalate", "escalate_page_request"):
+        with _span("headless_follow", {"decision": render_fork["decision"],
+                                       "reason": render_fork["reason"][:200]}):
+            try:
+                furl, hhtml, avail = await try_headless_follow(hops[-1].url if hops else src, device=device)
+                chain.playwright_available = avail and chain.playwright_available is not False or avail
+                if hhtml:
+                    chain.headless_used = True
+                    html = hhtml
+                    if furl and furl != (hops[-1].url if hops else src):
+                        from .models import Hop as H
+                        hops.append(H(index=len(hops), url=furl, status=200, redirect_type="headless-final"))
+                        chain.hops = hops
+                render_fork["escalated"] = bool(hhtml)
+            except Exception as e:
+                render_fork["escalated"] = False
+                render_fork["error"] = f"{type(e).__name__}: {str(e)[:150]}"
+    elif mode == "http_only":
+        render_fork["playwright_skipped"] = "http_only mode — pure curl-cffi/httpx path"
     chain.final_url = chain.hops[-1].url if chain.hops else src
     chain.final_status = chain.hops[-1].status if chain.hops else None
     chain.revenue_verified = bool(row.get("revenue_verified", False) or chain.revenue_verified)
@@ -189,14 +240,20 @@ async def audit_single_url(row: dict, cfg: dict, _shared_client=None, _easylist_
     except Exception:
         chain.hreflang = {}
     try:
-        chain.sponsored = audit_sponsored(html or "")
+        chain.sponsored = audit_sponsored(html or "", row.get("_review_html", "") or "")
     except Exception:
         chain.sponsored = {}
     try:
         last_headers: dict = {}
         if chain.hops:
-            # server header captured per hop; alt-svc needs raw headers — best-effort from botwall path
-            last_headers = {}
+            _last = chain.hops[-1]
+            _hop_hdrs = getattr(_last, "headers", None) or getattr(_last, "raw_headers", None)
+            if isinstance(_hop_hdrs, dict) and _hop_hdrs:
+                last_headers = dict(_hop_hdrs)
+            elif isinstance(timing_meta, dict) and isinstance(timing_meta.get("last_headers"), dict):
+                last_headers = dict(timing_meta["last_headers"])
+        elif isinstance(timing_meta, dict) and isinstance(timing_meta.get("last_headers"), dict):
+            last_headers = dict(timing_meta["last_headers"])
         chain.http3 = http3_early_hints(last_headers, html or "")
     except Exception:
         chain.http3 = {}
@@ -207,8 +264,11 @@ async def audit_single_url(row: dict, cfg: dict, _shared_client=None, _easylist_
                       "execution_mode": mode,
                       "headless_used": chain.headless_used,
                       "playwright_available": chain.playwright_available,
+                      "render_fork": render_fork,
                       "timing_honesty": (timing_meta or {"tcp_tls_est": "ESTIMATED via subtraction"}),
                       "proxy_exit": chain.proxy_exit_used}
+    if mode == "http_only":
+        chain.evidence["playwright_skipped"] = "http_only mode — pure curl-cffi/httpx path"
     last = chain.hops[-1] if chain.hops else None
     if not chain.hops:
         chain.chain_ok, chain.broken_reason = False, "no-hops"
@@ -247,10 +307,8 @@ async def audit_single_url(row: dict, cfg: dict, _shared_client=None, _easylist_
     # deep cross-device: auto (≤12 rows) else sampled (P0 cost fix — was 2× on every row)
     _deep = cfg.get("audit", {}).get("_deep_xdevice")
     _sample_n = int(cfg.get("audit", {}).get("deep_sample_n", 12) or 12)
-    _should_deep = bool(_deep) and (len(chain.hops) <= 0 or True)
-    # sampling decision is made per-row via row['_deep_sample']; bulk sets it. Single audits always deep when enabled.
-    if _deep and row.get("_deep_sample") is False:
-        _should_deep = False
+    # Honest condition: _deep flag already decided by caller; per-row sampling via row['_deep_sample'].
+    _should_deep = bool(_deep) and row.get("_deep_sample", True) is not False
     if _should_deep:
         alt = "mobile_ios" if device.startswith("desktop") else "desktop_chrome"
         try:
@@ -296,7 +354,7 @@ async def run_bulk_audit(rows: list[dict], cfg: dict, progress=None) -> list[Cha
         _deep_flag = bool(cfg.get("audit", {}).get("_deep_xdevice"))
         _n = int(cfg.get("audit", {}).get("deep_sample_n", 12) or 12)
         if _deep_flag and len(rows) > _n:
-            idxs = set(random.sample(range(len(rows)), min(_n, len(rows))))
+            idxs = set(random.Random(42).sample(range(len(rows)), min(_n, len(rows))))
             for i, r in enumerate(rows):
                 r["_deep_sample"] = i in idxs
     except Exception:
@@ -316,7 +374,8 @@ async def run_bulk_audit(rows: list[dict], cfg: dict, progress=None) -> list[Cha
         async with sem:
             if progress:
                 progress({"event": "start", "url": r.get("source_url", "")})
-            c = await audit_single_url(r, cfg, _shared_client=shared, _easylist_hosts=easylist_hosts)
+            with _span("audit_single_url", {"source_url": str(r.get("source_url", ""))[:200]}):
+                c = await audit_single_url(r, cfg, _shared_client=shared, _easylist_hosts=easylist_hosts)
             try:
                 bump("audits_total"); bump("hops_total", len(c.hops))
                 if not c.chain_ok:
@@ -332,7 +391,8 @@ async def run_bulk_audit(rows: list[dict], cfg: dict, progress=None) -> list[Cha
             return c
 
     try:
-        return list(await asyncio.gather(*[_one(r) for r in rows]))
+        with _span("run_bulk_audit", {"rows": len(rows)}):
+            return list(await asyncio.gather(*[_one(r) for r in rows]))
     finally:
         try:
             await shared.aclose()
